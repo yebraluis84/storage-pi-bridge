@@ -23,10 +23,25 @@ const BAUD = Number(process.env.WIREPAS_BAUD ?? 125000);
 // Captured from gatewaygo's bleunlock for both unit 1213 and unit 1234 — identical bytes,
 // so this is the network-layer-authenticated unlock command, not per-lock.
 const UNLOCK_APDU = Buffer.from('3400000200a200000000000000000000000000a2', 'hex');
+
+// Pre-unlock mesh broadcasts (captured from gatewaygo startup): the locks
+// validate unlock commands against their internal clock to prevent replay,
+// so a fresh timezone+time broadcast must hit them before unlock will succeed.
+const HELLO_APDU       = Buffer.from('3c', 'hex');                 // ep=9 and ep=13
+const TIMEZONE_APDU    = Buffer.from('414038000001', 'hex');        // ep=9 — UTC-4 (Noke's site default)
+function buildTimeApdu(): Buffer {
+  const t = Math.floor(Date.now() / 1000);
+  const apdu = Buffer.alloc(5);
+  apdu[0] = 0x40;
+  apdu.writeUInt32LE(t, 1);
+  return apdu;
+}
+
 const SRC_EP = 10;
-const DST_EP = 9;
-const TX_TIMEOUT_MS  = 8_000;
-const RX_WAIT_MS     = 6_000;
+const DST_EP = 9;     // unlock destination endpoint
+const BROADCAST = 0xffffffff;
+const TX_TIMEOUT_MS  = 5_000;
+const RX_WAIT_MS     = 8_000;
 const POLL_PERIOD_MS = 200;
 const DEBUG = process.env.WIREPAS_DEBUG !== '0';
 
@@ -52,8 +67,34 @@ async function main(): Promise<number> {
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
   void buildMsapAttrRead; void MSAP_ATTR; void buildStackStart; void buildStackStop;
-  // Send TX immediately. The chip is already running (gatewaygo started it
-  // historically) and elaborate stop/start/drain dances seem to corrupt state.
+
+  // ===== Pre-unlock broadcasts (mesh-wide time sync) =====
+  // Without these the locks reject unlock commands silently because
+  // they can't validate the unlock against a current time window.
+  let pdu = 0x0001;
+  const broadcastTx = async (label: string, dst_ep: number, apdu: Buffer) => {
+    const id = pdu++;
+    console.log(`[unlock] broadcast ${label}: pdu=0x${id.toString(16).padStart(4,'0')} dst_ep=${dst_ep} apdu=${apdu.toString('hex')}`);
+    try {
+      const c = await t.send((fid) => buildDsapDataTx(fid, {
+        pduId: id, sourceEndpoint: SRC_EP, destAddress: BROADCAST,
+        destEndpoint: dst_ep, qos: 1, requestTxIndication: false, apdu,
+      }), TX_TIMEOUT_MS);
+      console.log(`[unlock]   confirm result=${c.payload[2]} queue_cap=${c.payload[3]}`);
+    } catch (e: any) {
+      console.log(`[unlock]   ${label}: ${e.message} (proceeding)`);
+    }
+    await new Promise(r => setTimeout(r, 100));
+  };
+
+  await broadcastTx('hello-ep9 ', 9,  HELLO_APDU);
+  await broadcastTx('hello-ep13', 13, HELLO_APDU);
+  await broadcastTx('timezone  ', 9,  TIMEZONE_APDU);
+  await broadcastTx('time-sync ', 13, buildTimeApdu());
+
+  // Brief settle so locks can update their internal clock before we ask one to unlock
+  console.log('[unlock] settling 1.5s for mesh to propagate time sync...');
+  await new Promise(r => setTimeout(r, 1500));
 
   let response: DataRxIndication | null = null;
 
@@ -73,9 +114,8 @@ async function main(): Promise<number> {
     }
   });
 
-  // Fresh PDU ID per request (chip may track in-flight PDUs by id and reject duplicates)
-  const pduId = (Date.now() & 0xffff) || 1;
-  console.log(`[unlock] sending DSAP-DATA-TX  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} qos=1 apdu=${UNLOCK_APDU.toString('hex')}`);
+  const pduId = pdu++;
+  console.log(`[unlock] sending DSAP-DATA-TX (unlock)  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} qos=1 apdu=${UNLOCK_APDU.toString('hex')}`);
   const confirm = await t.send((fid) => buildDsapDataTx(fid, {
     pduId:           pduId,
     sourceEndpoint:  SRC_EP,
