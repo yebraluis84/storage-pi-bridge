@@ -7,11 +7,15 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test:unlock": "tsx src/testUnlock.ts"
+    "test:unlock": "tsx src/testUnlock.ts",
+    "wirepas:selftest": "tsx src/wirepas/selftest.ts",
+    "wirepas:decode": "tsx src/wirepas/decodeCapture.ts",
+    "wirepas:probe": "tsx src/wirepas/probe.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "node-ble": "^1.13.0",
+    "serialport": "^12.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
