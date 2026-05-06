@@ -55,6 +55,31 @@ export class RawSerial extends EventEmitter {
         fs.constants.O_RDWR | fs.constants.O_NOCTTY | fs.constants.O_NONBLOCK,
       );
 
+      // Drain stale bytes left in the kernel input buffer from any previous
+      // process that opened this tty. Reading until EAGAIN with a short hard
+      // cap so we don't loop forever if the chip is genuinely chatty.
+      const drainBuf = Buffer.alloc(2048);
+      const drainEnd = Date.now() + 250;
+      let drained = 0;
+      while (Date.now() < drainEnd) {
+        try {
+          const n = fs.readSync(this.fd, drainBuf, 0, drainBuf.length, null);
+          if (n > 0) drained += n;
+          else break;
+        } catch (e: any) {
+          if (e?.code === 'EAGAIN' || e?.code === 'EWOULDBLOCK') {
+            // brief delay so newly-arriving bytes can show up
+            const wait = Date.now() + 30;
+            while (Date.now() < wait) { /* spin briefly */ }
+            try {
+              const n2 = fs.readSync(this.fd, drainBuf, 0, drainBuf.length, null);
+              if (n2 > 0) drained += n2; else break;
+            } catch { break; }
+          } else throw e;
+        }
+      }
+      if (this.debug && drained > 0) console.log(`[raw-serial] drained ${drained} stale bytes`);
+
       this._isOpen = true;
       this.pollTimer = setInterval(() => this.pump(), 20);
       done(null);
