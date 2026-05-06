@@ -178,12 +178,12 @@ export class WirepasTransport extends EventEmitter {
       }
       // Unmatched confirm — fall through as if it's an indication
     } else {
-      // Indication from chip (request-id range, e.g. 0x02/0x03/0x07).
-      // Per Wirepas Dual-MCU spec, host MUST acknowledge each indication with a
-      // response primitive (id|0x80) so the chip will deliver the next one.
-      // Without this, the chip's indication queue stalls and lock responses
-      // get stuck behind unrelated mesh chatter.
-      this.sendIndicationAck(prim.primitive, true);
+      // Indication from chip. Only DSAP_DATA_RX_INDICATION (0x03) needs an ack
+      // per gatewaygo's wire pattern — other indications (0x07 state, 0x02 tx
+      // ind) are not acked and acking them seems to wedge the chip.
+      if (prim.primitive === PRIM.DSAP_DATA_RX_INDICATION) {
+        this.sendIndicationAck(prim.primitive, true);
+      }
     }
     this.emit('indication', prim);
   }
