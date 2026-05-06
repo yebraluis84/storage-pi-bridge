@@ -166,8 +166,8 @@ export class WirepasTransport extends EventEmitter {
     if (!prim) return;
     this.emit('primitive', prim);
 
-    // Confirms have MSB set. Match against pending requests.
     if ((prim.primitive & 0x80) !== 0) {
+      // Confirm — match against a pending request.
       const key = `${prim.primitive.toString(16)}:${prim.frameId.toString(16)}`;
       const pending = this.pending.get(key);
       if (pending) {
@@ -176,8 +176,31 @@ export class WirepasTransport extends EventEmitter {
         pending.resolve(prim);
         return;
       }
+      // Unmatched confirm — fall through as if it's an indication
+    } else {
+      // Indication from chip (request-id range, e.g. 0x02/0x03/0x07).
+      // Per Wirepas Dual-MCU spec, host MUST acknowledge each indication with a
+      // response primitive (id|0x80) so the chip will deliver the next one.
+      // Without this, the chip's indication queue stalls and lock responses
+      // get stuck behind unrelated mesh chatter.
+      this.sendIndicationAck(prim.primitive, true);
     }
-    // Indications (0x02, 0x03, etc.) and unmatched confirms fall through.
     this.emit('indication', prim);
+  }
+
+  /**
+   * Send the response primitive that acknowledges an indication. Required by
+   * the Wirepas Dual-MCU API after every received indication.
+   *
+   * Response primitive id = indication_id | 0x80
+   * Payload: 1 byte. 0x01 = "continue, send next". 0x00 = "stop sending".
+   */
+  private sendIndicationAck(indicationPrim: number, cont: boolean): void {
+    const responsePrim = indicationPrim | 0x80;
+    const fid = this.allocFrameId();
+    const frame = Buffer.from([responsePrim, fid, 0x01, cont ? 0x01 : 0x00]);
+    const wire = encodeFrame(frame);
+    if (this.opts.debug) console.log(`[wp ack] ${wire.toString('hex')} (ack ind 0x${indicationPrim.toString(16)})`);
+    this.port.write(wire, () => { /* fire-and-forget */ });
   }
 }
