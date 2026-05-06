@@ -151,6 +151,28 @@ export class WirepasTransport extends EventEmitter {
     }
   }
 
+  /**
+   * Repeatedly poll-and-ack until the chip reports no more pending indications.
+   * Use this to drain stale indications before sending a request whose confirm
+   * could otherwise be buried in the indication backlog.
+   */
+  async drainPendingIndications(maxIterations = 50): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < maxIterations; i++) {
+      const fid = this.allocFrameId();
+      let conf;
+      try { conf = await this.request(buildIndicationPoll(fid), 500); }
+      catch { break; }
+      const moreFollow = (conf.payload[0] ?? 0) === 1;
+      total++;
+      if (!moreFollow) break;
+      // Allow incoming indication frames to be processed and auto-acked
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (this.opts.debug) console.log(`[wp drain] ${total} poll cycle(s)`);
+    return total;
+  }
+
   private onData(chunk: Buffer): void {
     if (this.opts.debug) console.log(`[wp rx] ${chunk.toString('hex')}`);
     this.rxBuf = Buffer.concat([this.rxBuf, chunk]);

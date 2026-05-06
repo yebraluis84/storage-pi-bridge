@@ -51,11 +51,13 @@ async function main(): Promise<number> {
 
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
-  // Skip pre-flight checks (stack_status / stack_start). We've empirically seen
-  // the chip reports stack_status=0 even while DSAP_DATA_TX queues successfully
-  // (the attribute reading is misleading on this firmware). If TX fails we'll
-  // get a non-zero result code in the confirm and retry the start step then.
   void buildMsapAttrRead; void MSAP_ATTR; void buildStackStart;
+
+  // Drain any backlog of pending indications. The chip's queue can have stale
+  // mesh broadcasts from previous gatewaygo runs; if we don't drain them,
+  // our request's confirm gets buried behind them and our timeout fires.
+  console.log('[unlock] draining pending indications...');
+  await t.drainPendingIndications();
 
   let response: DataRxIndication | null = null;
 
