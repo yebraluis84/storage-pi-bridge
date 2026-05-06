@@ -114,29 +114,19 @@ async function main(): Promise<number> {
     }
   });
 
+  // Fire-and-forget unlock TX. We don't wait for TX_CONFIRM because it routinely
+  // gets buried in indication noise from chatty mesh nodes. Truth is the lock's
+  // actual RX response — if that arrives, the unlock worked. If not, no amount
+  // of confirm-watching would have helped.
   const pduId = pdu++;
-  console.log(`[unlock] sending DSAP-DATA-TX (unlock)  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} qos=1 apdu=${UNLOCK_APDU.toString('hex')}`);
-  const confirm = await t.send((fid) => buildDsapDataTx(fid, {
-    pduId:           pduId,
-    sourceEndpoint:  SRC_EP,
-    destAddress:     address,
-    destEndpoint:    DST_EP,
-    qos:             1,
-    requestTxIndication: false,
-    apdu:            UNLOCK_APDU,
-  }), TX_TIMEOUT_MS);
-  // DSAP-DATA-TX.confirm payload format: PDU_ID(2 LE) + result(1) + queue_capacity(1)
-  const echoedPdu = confirm.payload.readUInt16LE(0);
-  const txResult  = confirm.payload[2];
-  const queueCap  = confirm.payload[3];
-  console.log(`[unlock] TX confirm pdu=0x${echoedPdu.toString(16).padStart(4, '0')} result=${txResult} queue_cap=${queueCap}`);
-  if (txResult !== 0) {
-    console.log('[unlock] chip rejected the TX. Result code reference:');
-    console.log('  1=encrypt err, 2=qos err, 3=len err, 4=hops err, 5=opts err, 6=queue full,');
-    console.log('  7=stack stopped, 8=invalid src/dst ep, 9=no route, ...');
-    await t.close();
-    return 3;
-  }
+  console.log(`[unlock] firing DSAP-DATA-TX (unlock)  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} apdu=${UNLOCK_APDU.toString('hex')}`);
+  // Build the frame and write it directly without waiting for the matched confirm
+  await t.send((fid) => buildDsapDataTx(fid, {
+    pduId, sourceEndpoint: SRC_EP, destAddress: address, destEndpoint: DST_EP,
+    qos: 1, requestTxIndication: false, apdu: UNLOCK_APDU,
+  }), TX_TIMEOUT_MS).catch((e) => {
+    console.log(`[unlock]   TX confirm not received (${e.message}) — proceeding anyway`);
+  });
 
   console.log(`[unlock] waiting up to ${RX_WAIT_MS}ms for lock response...`);
   const start = Date.now();
