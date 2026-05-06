@@ -10,7 +10,8 @@
     "test:unlock": "tsx src/testUnlock.ts",
     "wirepas:selftest": "tsx src/wirepas/selftest.ts",
     "wirepas:decode": "tsx src/wirepas/decodeCapture.ts",
-    "wirepas:probe": "tsx src/wirepas/probe.ts"
+    "wirepas:probe": "tsx src/wirepas/probe.ts",
+    "wirepas:parse-strace": "tsx src/wirepas/parseStrace.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
