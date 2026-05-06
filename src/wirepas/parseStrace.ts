@@ -43,9 +43,14 @@ function decodeEscaped(s: string): Buffer {
       const hex = s.slice(i + 2, i + 4);
       out.push(parseInt(hex, 16) & 0xff);
       i += 3;
-    } else if (n === 'n') { out.push(0x0a); i++; }
-    else if (n === 'r')   { out.push(0x0d); i++; }
-    else if (n === 't')   { out.push(0x09); i++; }
+    } else if (n === 'a') { out.push(0x07); i++; }   // bell
+    else if (n === 'b')   { out.push(0x08); i++; }   // backspace
+    else if (n === 't')   { out.push(0x09); i++; }   // tab
+    else if (n === 'n')   { out.push(0x0a); i++; }   // newline
+    else if (n === 'v')   { out.push(0x0b); i++; }   // vertical tab
+    else if (n === 'f')   { out.push(0x0c); i++; }   // form feed (the bug — was missing!)
+    else if (n === 'r')   { out.push(0x0d); i++; }   // carriage return
+    else if (n === 'e')   { out.push(0x1b); i++; }   // escape (GNU)
     else if (n === '0')   { out.push(0x00); i++; }
     else if (n === '\\')  { out.push(0x5c); i++; }
     else if (n === '"')   { out.push(0x22); i++; }
@@ -61,7 +66,9 @@ function decodeEscaped(s: string): Buffer {
  *   read(7</dev/ttyS3>,  "...", 4096) = 17
  * Returns the captured (op, fd-comment, payload-string-literal, retval).
  */
-const RE = /^\s*(?:\[pid\s+\d+\]\s+)?(read|write)\((\d+)<([^>]+)>,\s*"((?:[^"\\]|\\.)*)"\s*,\s*\d+\)\s*=\s*(-?\d+)/;
+// strace 4.11 (Ubuntu 16.04) prefixes lines with "<pid>  " (bare digits + 2 spaces).
+// strace 5+ uses "[pid <n>] ". Accept both, also no prefix (single-process trace).
+const RE = /^(?:\d+\s+|\[pid\s+\d+\]\s+)?(read|write)\((\d+)<([^>]+)>,\s*"((?:[^"\\]|\\.)*)"\s*,\s*\d+\)\s*=\s*(-?\d+)/;
 
 const tx: Buffer[] = [];
 const rx: Buffer[] = [];
