@@ -138,8 +138,9 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const skipListen = process.argv.includes('--no-listen');
   const { shortMac, address } = parseTarget(arg);
-  console.log(`[unlock] target short_mac=${shortMac} -> wirepas dst=0x${address.toString(16).padStart(8, '0')}`);
+  console.log(`[unlock] target short_mac=${shortMac} -> wirepas dst=0x${address.toString(16).padStart(8, '0')}${skipListen ? '  (skipping route discovery)' : ''}`);
 
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
@@ -171,20 +172,25 @@ async function main(): Promise<number> {
   // ===== Phase 1: discover the route to target lock =====
   // Chip's routing table is built from received indications. Without a recent
   // broadcast from `address`, the chip can't route our TX and it gets dropped.
-  console.log('[unlock] phase 1: listening for any indication from target lock...');
-  const listenStart = Date.now();
-  const LISTEN_FOR_TARGET_MS = 30_000;
-  while (heardFrom.has(address) === false && Date.now() - listenStart < LISTEN_FOR_TARGET_MS) {
-    try { await t.pollIndications(); } catch { /* ignore */ }
-    await new Promise(r => setTimeout(r, 200));
+  if (!skipListen) {
+    console.log('[unlock] phase 1: listening for any indication from target lock...');
+    const listenStart = Date.now();
+    const LISTEN_FOR_TARGET_MS = 30_000;
+    while (heardFrom.has(address) === false && Date.now() - listenStart < LISTEN_FOR_TARGET_MS) {
+      try { await t.pollIndications(); } catch { /* ignore */ }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    if (!heardFrom.has(address)) {
+      console.log(`[unlock] timed out after ${Date.now()-listenStart}ms; target never broadcast`);
+      console.log('[unlock] heard from:', [...heardFrom].map(a => '0x' + a.toString(16).padStart(8,'0')).join(' '));
+      console.log('[unlock] (try --no-listen to fire TX anyway, relying on chip persistent routes)');
+      await t.close();
+      return 4;
+    }
+    console.log(`[unlock] target reachable (heard from ${heardFrom.size} node(s) in ${Date.now()-listenStart}ms)`);
+  } else {
+    console.log('[unlock] --no-listen: skipping route discovery, firing on persistent chip routes');
   }
-  if (!heardFrom.has(address)) {
-    console.log(`[unlock] timed out after ${Date.now()-listenStart}ms; target never broadcast`);
-    console.log('[unlock] heard from:', [...heardFrom].map(a => '0x' + a.toString(16).padStart(8,'0')).join(' '));
-    await t.close();
-    return 4;
-  }
-  console.log(`[unlock] target reachable (heard from ${heardFrom.size} node(s) in ${Date.now()-listenStart}ms)`);
 
   // ===== Pre-unlock broadcasts (mesh-wide time sync) =====
   // Without these the locks reject unlock commands silently because
