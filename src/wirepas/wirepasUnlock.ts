@@ -14,7 +14,7 @@
 import { WirepasTransport } from './transport';
 import {
   buildDsapDataTx, parseDsapDataRx, PRIM, PRIM_NAME, DataRxIndication,
-  buildMsapAttrRead, MSAP_ATTR, buildStackStart,
+  buildMsapAttrRead, MSAP_ATTR, buildStackStart, buildStackStop,
 } from './frame';
 
 const PORT = process.env.WIREPAS_PORT ?? '/dev/ttyS3';
@@ -51,13 +51,24 @@ async function main(): Promise<number> {
 
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
-  void buildMsapAttrRead; void MSAP_ATTR; void buildStackStart;
+  void buildMsapAttrRead; void MSAP_ATTR;
 
-  // Drain any backlog of pending indications. The chip's queue can have stale
-  // mesh broadcasts from previous gatewaygo runs; if we don't drain them,
-  // our request's confirm gets buried behind them and our timeout fires.
-  console.log('[unlock] draining pending indications...');
-  await t.drainPendingIndications();
+  // Cycle the stack: stop -> wait -> start. With stack stopped the chip
+  // doesn't generate new indications, letting us start our TX from a clean
+  // state. Stop+start is fast and idempotent on Wirepas.
+  console.log('[unlock] stopping stack to clear queue...');
+  try {
+    const stopConf = await t.send((fid) => buildStackStop(fid), 3000);
+    console.log(`[unlock] stack_stop result=${stopConf.payload[0]}`);
+  } catch (e: any) { console.log(`[unlock] stack_stop: ${e.message} (proceeding)`); }
+  await new Promise((r) => setTimeout(r, 800));
+
+  console.log('[unlock] starting stack...');
+  try {
+    const startConf = await t.send((fid) => buildStackStart(fid, false), 3000);
+    console.log(`[unlock] stack_start result=${startConf.payload[0]}`);
+  } catch (e: any) { console.log(`[unlock] stack_start: ${e.message} (proceeding)`); }
+  await new Promise((r) => setTimeout(r, 500));
 
   let response: DataRxIndication | null = null;
 
