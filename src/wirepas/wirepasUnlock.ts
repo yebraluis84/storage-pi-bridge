@@ -51,24 +51,9 @@ async function main(): Promise<number> {
 
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
-  void buildMsapAttrRead; void MSAP_ATTR;
-
-  // Cycle the stack: stop -> wait -> start. With stack stopped the chip
-  // doesn't generate new indications, letting us start our TX from a clean
-  // state. Stop+start is fast and idempotent on Wirepas.
-  console.log('[unlock] stopping stack to clear queue...');
-  try {
-    const stopConf = await t.send((fid) => buildStackStop(fid), 3000);
-    console.log(`[unlock] stack_stop result=${stopConf.payload[0]}`);
-  } catch (e: any) { console.log(`[unlock] stack_stop: ${e.message} (proceeding)`); }
-  await new Promise((r) => setTimeout(r, 800));
-
-  console.log('[unlock] starting stack...');
-  try {
-    const startConf = await t.send((fid) => buildStackStart(fid, false), 3000);
-    console.log(`[unlock] stack_start result=${startConf.payload[0]}`);
-  } catch (e: any) { console.log(`[unlock] stack_start: ${e.message} (proceeding)`); }
-  await new Promise((r) => setTimeout(r, 500));
+  void buildMsapAttrRead; void MSAP_ATTR; void buildStackStart; void buildStackStop;
+  // Send TX immediately. The chip is already running (gatewaygo started it
+  // historically) and elaborate stop/start/drain dances seem to corrupt state.
 
   let response: DataRxIndication | null = null;
 
