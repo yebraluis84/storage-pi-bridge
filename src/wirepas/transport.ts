@@ -7,8 +7,8 @@
  * Default UART config per Wirepas spec: 125000 8N1.
  */
 
-import { SerialPort } from 'serialport';
 import { EventEmitter } from 'events';
+import { RawSerial } from './rawSerial';
 import { encodeFrame, decodeStream, DecodedFrame } from './slip';
 import { decodePrimitive, DecodedPrimitive, buildIndicationPoll, PRIM } from './frame';
 
@@ -35,7 +35,7 @@ interface PendingRequest {
  *   'crcError'   (Buffer)              — frames that failed CRC
  */
 export class WirepasTransport extends EventEmitter {
-  private port:    SerialPort;
+  private port:    RawSerial;
   private rxBuf:   Buffer = Buffer.alloc(0);
   private nextFid: number = 1;
   private pending: Map<string, PendingRequest> = new Map();
@@ -54,17 +54,13 @@ export class WirepasTransport extends EventEmitter {
       pollIntervalMs: opts.pollIntervalMs ?? 200,
       debug:          opts.debug          ?? false,
     };
-    this.port = new SerialPort({
+    this.port = new RawSerial({
       path:     this.opts.path,
       baudRate: this.opts.baudRate,
-      dataBits: 8,
-      parity:   'none',
-      stopBits: 1,
-      autoOpen: false,
+      debug:    this.opts.debug,
     });
-    this.port.on('data',  (chunk) => this.onData(chunk));
-    this.port.on('error', (err)   => this.emit('error', err));
-    this.port.on('close', ()      => this.emit('close'));
+    this.port.on('data',  (chunk: Buffer) => this.onData(chunk));
+    this.port.on('error', (err: Error)    => this.emit('error', err));
   }
 
   open(): Promise<void> {
