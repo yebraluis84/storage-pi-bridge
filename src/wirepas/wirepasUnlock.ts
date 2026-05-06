@@ -12,7 +12,10 @@
  */
 
 import { WirepasTransport } from './transport';
-import { buildDsapDataTx, parseDsapDataRx, PRIM, PRIM_NAME, DataRxIndication } from './frame';
+import {
+  buildDsapDataTx, parseDsapDataRx, PRIM, PRIM_NAME, DataRxIndication,
+  buildMsapAttrRead, MSAP_ATTR, buildStackStart,
+} from './frame';
 
 const PORT = process.env.WIREPAS_PORT ?? '/dev/ttyS3';
 const BAUD = Number(process.env.WIREPAS_BAUD ?? 125000);
@@ -22,10 +25,10 @@ const BAUD = Number(process.env.WIREPAS_BAUD ?? 125000);
 const UNLOCK_APDU = Buffer.from('3400000200a200000000000000000000000000a2', 'hex');
 const SRC_EP = 10;
 const DST_EP = 9;
-const PDU_ID = 0x0001;
 const TX_TIMEOUT_MS  = 2_000;
 const RX_WAIT_MS     = 6_000;
 const POLL_PERIOD_MS = 200;
+const DEBUG = process.env.WIREPAS_DEBUG !== '0';
 
 function parseTarget(s: string): { shortMac: string; address: number } {
   const clean = s.replace(/[:\s]/g, '').toUpperCase();
@@ -46,8 +49,21 @@ async function main(): Promise<number> {
   const { shortMac, address } = parseTarget(arg);
   console.log(`[unlock] target short_mac=${shortMac} -> wirepas dst=0x${address.toString(16).padStart(8, '0')}`);
 
-  const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: false, pollIntervalMs: 0 });
+  const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
+
+  // Make sure the stack is running. Stack stopped (status=0) → DSAP_DATA_TX rejects with result=1.
+  const statusConf = await t.send((fid) => buildMsapAttrRead(fid, MSAP_ATTR.STACK_STATUS), 1500);
+  const status = statusConf.payload[4];
+  console.log(`[unlock] stack_status=0x${status.toString(16).padStart(2, '0')}`);
+  if (status !== 0x01) {
+    console.log('[unlock] stack not running — sending MSAP-STACK_START.req');
+    const sc = await t.send((fid) => buildStackStart(fid, true), 3000);
+    console.log(`[unlock] stack_start confirm result=${sc.payload[0]}`);
+    // Re-check
+    const reConf = await t.send((fid) => buildMsapAttrRead(fid, MSAP_ATTR.STACK_STATUS), 1500);
+    console.log(`[unlock] post-start stack_status=0x${reConf.payload[4].toString(16).padStart(2, '0')}`);
+  }
 
   let response: DataRxIndication | null = null;
 
@@ -67,9 +83,11 @@ async function main(): Promise<number> {
     }
   });
 
-  console.log(`[unlock] sending DSAP-DATA-TX  src_ep=${SRC_EP} dst_ep=${DST_EP} qos=1 apdu=${UNLOCK_APDU.toString('hex')}`);
+  // Fresh PDU ID per request (chip may track in-flight PDUs by id and reject duplicates)
+  const pduId = (Date.now() & 0xffff) || 1;
+  console.log(`[unlock] sending DSAP-DATA-TX  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} qos=1 apdu=${UNLOCK_APDU.toString('hex')}`);
   const confirm = await t.send((fid) => buildDsapDataTx(fid, {
-    pduId:           PDU_ID,
+    pduId:           pduId,
     sourceEndpoint:  SRC_EP,
     destAddress:     address,
     destEndpoint:    DST_EP,
