@@ -25,7 +25,7 @@ const BAUD = Number(process.env.WIREPAS_BAUD ?? 125000);
 const UNLOCK_APDU = Buffer.from('3400000200a200000000000000000000000000a2', 'hex');
 const SRC_EP = 10;
 const DST_EP = 9;
-const TX_TIMEOUT_MS  = 2_000;
+const TX_TIMEOUT_MS  = 8_000;
 const RX_WAIT_MS     = 6_000;
 const POLL_PERIOD_MS = 200;
 const DEBUG = process.env.WIREPAS_DEBUG !== '0';
