@@ -59,10 +59,17 @@ function parseTarget(s: string): { shortMac: string; address: number } {
 
 async function main(): Promise<number> {
   const arg = process.argv[2];
-  if (!arg) { console.error('usage: wirepasUnlock.js <short_mac|full_mac>     (or --listen for mesh recon)'); return 2; }
+  if (!arg) {
+    console.error('usage:');
+    console.error('  wirepasUnlock.js <short_mac|full_mac>   unlock specific lock');
+    console.error('  wirepasUnlock.js --listen [seconds]      mesh recon, default 30s');
+    console.error('  wirepasUnlock.js --auto [seconds]        listen, then unlock most-active node');
+    return 2;
+  }
 
-  // --listen mode: open transport, drain indications for 30s, summarize what we heard
-  if (arg === '--listen') {
+  // --listen / --auto: shared mesh recon path
+  if (arg === '--listen' || arg === '--auto') {
+    const seconds = Number(process.argv[3] ?? 30);
     const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: false, pollIntervalMs: 0 });
     await t.open();
     const heardFrom = new Map<number, number>();
@@ -72,19 +79,34 @@ async function main(): Promise<number> {
       if (!ind) return;
       heardFrom.set(ind.srcAddress, (heardFrom.get(ind.srcAddress) ?? 0) + 1);
     });
-    console.log('[listen] listening 30s for mesh activity...');
+    console.log(`[recon] listening ${seconds}s for mesh activity...`);
     const start = Date.now();
-    while (Date.now() - start < 30_000) {
+    while (Date.now() - start < seconds * 1000) {
       try { await t.pollIndications(); } catch { /* ignore */ }
       await new Promise(r => setTimeout(r, 200));
     }
-    await t.close();
     const sorted = [...heardFrom.entries()].sort((a, b) => b[1] - a[1]);
-    console.log(`[listen] heard from ${heardFrom.size} unique node(s):`);
+    console.log(`[recon] heard from ${heardFrom.size} unique node(s):`);
     for (const [addr, count] of sorted) {
       console.log(`  0x${addr.toString(16).padStart(8, '0')}  x${count}`);
     }
-    return 0;
+
+    if (arg === '--listen') { await t.close(); return 0; }
+
+    // --auto: pick the most-active non-self node and unlock it immediately
+    const myNodeAddr = 0x00159e43; // gateway's own address (skip)
+    const target = sorted.find(([a]) => a !== myNodeAddr);
+    if (!target) {
+      console.log('[auto] no candidate target heard — aborting');
+      await t.close();
+      return 5;
+    }
+    const [autoAddr] = target;
+    console.log(`[auto] unlocking most-active target 0x${autoAddr.toString(16).padStart(8, '0')}`);
+    await t.close();
+    // Re-invoke main flow with computed short_mac (last 3 hex bytes of address)
+    process.argv[2] = autoAddr.toString(16).padStart(8, '0').slice(-6).toUpperCase();
+    return await main();
   }
 
   const { shortMac, address } = parseTarget(arg);
