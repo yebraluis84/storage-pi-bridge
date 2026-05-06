@@ -59,7 +59,33 @@ function parseTarget(s: string): { shortMac: string; address: number } {
 
 async function main(): Promise<number> {
   const arg = process.argv[2];
-  if (!arg) { console.error('usage: wirepasUnlock.js <short_mac|full_mac>'); return 2; }
+  if (!arg) { console.error('usage: wirepasUnlock.js <short_mac|full_mac>     (or --listen for mesh recon)'); return 2; }
+
+  // --listen mode: open transport, drain indications for 30s, summarize what we heard
+  if (arg === '--listen') {
+    const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: false, pollIntervalMs: 0 });
+    await t.open();
+    const heardFrom = new Map<number, number>();
+    t.on('indication', (p) => {
+      if (p.primitive !== PRIM.DSAP_DATA_RX_INDICATION) return;
+      const ind = parseDsapDataRx(p.payload);
+      if (!ind) return;
+      heardFrom.set(ind.srcAddress, (heardFrom.get(ind.srcAddress) ?? 0) + 1);
+    });
+    console.log('[listen] listening 30s for mesh activity...');
+    const start = Date.now();
+    while (Date.now() - start < 30_000) {
+      try { await t.pollIndications(); } catch { /* ignore */ }
+      await new Promise(r => setTimeout(r, 200));
+    }
+    await t.close();
+    const sorted = [...heardFrom.entries()].sort((a, b) => b[1] - a[1]);
+    console.log(`[listen] heard from ${heardFrom.size} unique node(s):`);
+    for (const [addr, count] of sorted) {
+      console.log(`  0x${addr.toString(16).padStart(8, '0')}  x${count}`);
+    }
+    return 0;
+  }
 
   const { shortMac, address } = parseTarget(arg);
   console.log(`[unlock] target short_mac=${shortMac} -> wirepas dst=0x${address.toString(16).padStart(8, '0')}`);
@@ -67,6 +93,47 @@ async function main(): Promise<number> {
   const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: DEBUG, pollIntervalMs: 0 });
   await t.open();
   void buildMsapAttrRead; void MSAP_ATTR; void buildStackStart; void buildStackStop;
+
+  // Single indication listener. Tracks every node we've heard from for routing,
+  // and conditionally records "lock response" only if the indication arrived
+  // after we fired the unlock (so heartbeats during route discovery don't get
+  // mistaken for an unlock acknowledgement).
+  const heardFrom = new Set<number>();
+  let unlockSentAt: number | null = null;
+  let response: DataRxIndication | null = null;
+  t.on('indication', (p) => {
+    if (p.primitive !== PRIM.DSAP_DATA_RX_INDICATION) return;
+    const ind = parseDsapDataRx(p.payload);
+    if (!ind) return;
+    heardFrom.add(ind.srcAddress);
+    const fromAddr = '0x' + ind.srcAddress.toString(16).padStart(8, '0');
+    if (ind.srcAddress === address) {
+      if (unlockSentAt !== null && !response) {
+        response = ind;
+        console.log(`[unlock]   RESPONSE  from=${fromAddr}  hops=${ind.hopCount}  t=${ind.travelTimeMs}ms  apdu(${ind.apdu.length})=${ind.apdu.toString('hex')}`);
+      } else {
+        console.log(`[unlock]   ✓ heard from target  hops=${ind.hopCount}  t=${ind.travelTimeMs}ms  apdu(${ind.apdu.length})=${ind.apdu.toString('hex')}`);
+      }
+    }
+  });
+
+  // ===== Phase 1: discover the route to target lock =====
+  // Chip's routing table is built from received indications. Without a recent
+  // broadcast from `address`, the chip can't route our TX and it gets dropped.
+  console.log('[unlock] phase 1: listening for any indication from target lock...');
+  const listenStart = Date.now();
+  const LISTEN_FOR_TARGET_MS = 30_000;
+  while (heardFrom.has(address) === false && Date.now() - listenStart < LISTEN_FOR_TARGET_MS) {
+    try { await t.pollIndications(); } catch { /* ignore */ }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (!heardFrom.has(address)) {
+    console.log(`[unlock] timed out after ${Date.now()-listenStart}ms; target never broadcast`);
+    console.log('[unlock] heard from:', [...heardFrom].map(a => '0x' + a.toString(16).padStart(8,'0')).join(' '));
+    await t.close();
+    return 4;
+  }
+  console.log(`[unlock] target reachable (heard from ${heardFrom.size} node(s) in ${Date.now()-listenStart}ms)`);
 
   // ===== Pre-unlock broadcasts (mesh-wide time sync) =====
   // Without these the locks reject unlock commands silently because
@@ -96,28 +163,11 @@ async function main(): Promise<number> {
   console.log('[unlock] settling 1.5s for mesh to propagate time sync...');
   await new Promise(r => setTimeout(r, 1500));
 
-  let response: DataRxIndication | null = null;
+  // Mark the moment we fire the unlock so the indication handler can distinguish
+  // the lock's actual response from random heartbeats arriving simultaneously.
+  unlockSentAt = Date.now();
+  void PRIM_NAME;
 
-  t.on('indication', (p) => {
-    if (p.primitive !== PRIM.DSAP_DATA_RX_INDICATION) {
-      console.log(`[unlock]   async ${PRIM_NAME[p.primitive] ?? '0x' + p.primitive.toString(16)} payload=${p.payload.toString('hex')}`);
-      return;
-    }
-    const ind = parseDsapDataRx(p.payload);
-    if (!ind) return;
-    const fromAddr = '0x' + ind.srcAddress.toString(16).padStart(8, '0');
-    if (ind.srcAddress === address) {
-      response = ind;
-      console.log(`[unlock]   RESPONSE  from=${fromAddr}  src_ep=${ind.srcEndpoint}  dst_ep=${ind.dstEndpoint}  hops=${ind.hopCount}  t=${ind.travelTimeMs}ms  apdu(${ind.apdu.length})=${ind.apdu.toString('hex')}`);
-    } else {
-      console.log(`[unlock]   other RX from=${fromAddr}  apdu(${ind.apdu.length})=${ind.apdu.toString('hex')}`);
-    }
-  });
-
-  // Fire-and-forget unlock TX. We don't wait for TX_CONFIRM because it routinely
-  // gets buried in indication noise from chatty mesh nodes. Truth is the lock's
-  // actual RX response — if that arrives, the unlock worked. If not, no amount
-  // of confirm-watching would have helped.
   const pduId = pdu++;
   console.log(`[unlock] firing DSAP-DATA-TX (unlock)  pdu=0x${pduId.toString(16).padStart(4, '0')} src_ep=${SRC_EP} dst_ep=${DST_EP} apdu=${UNLOCK_APDU.toString('hex')}`);
   // Build the frame and write it directly without waiting for the matched confirm

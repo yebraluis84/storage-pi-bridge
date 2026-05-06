@@ -68,7 +68,9 @@ function decodeEscaped(s: string): Buffer {
  */
 // strace 4.11 (Ubuntu 16.04) prefixes lines with "<pid>  " (bare digits + 2 spaces).
 // strace 5+ uses "[pid <n>] ". Accept both, also no prefix (single-process trace).
-const RE = /^(?:\d+\s+|\[pid\s+\d+\]\s+)?(read|write)\((\d+)<([^>]+)>,\s*"((?:[^"\\]|\\.)*)"\s*,\s*\d+\)\s*=\s*(-?\d+)/;
+// Also accept "<unfinished ...>" tails — those happen when -f interleaves
+// syscalls and the byte buffer is shown on the unfinished line.
+const RE = /^(?:\d+\s+|\[pid\s+\d+\]\s+)?(read|write)\((\d+)<([^>]+)>,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*(?:\)\s*=\s*(-?\d+)|<unfinished\s*\.\.\.>)/;
 
 const tx: Buffer[] = [];
 const rx: Buffer[] = [];
@@ -78,12 +80,14 @@ for (const raw of text.split('\n')) {
   lineNo++;
   const m = raw.match(RE);
   if (!m) continue;
-  const [, op, , fdName, lit, retStr] = m;
+  const [, op, , fdName, lit, sizeStr, retStr] = m;
   if (fdName !== ttyFilter) continue;
-  const ret = Number(retStr);
-  if (ret <= 0) continue; // EAGAIN, errors
+  // For "= N" lines we have a real return value; for "<unfinished>" lines we
+  // assume the syscall succeeded with the requested size. Either way ret>0
+  // means usable bytes.
+  const ret = retStr !== undefined ? Number(retStr) : Number(sizeStr);
+  if (ret <= 0) continue;
   const decoded = decodeEscaped(lit);
-  // strace truncates per its -s setting; ret tells us how much actually transferred
   const slice = decoded.subarray(0, ret);
   if (op === 'write') tx.push(slice);
   else rx.push(slice);
