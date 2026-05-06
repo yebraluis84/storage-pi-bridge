@@ -95,9 +95,15 @@ async function main(): Promise<number> {
     requestTxIndication: false,
     apdu:            UNLOCK_APDU,
   }), TX_TIMEOUT_MS);
-  const txResult = confirm.payload[0];
-  console.log(`[unlock] TX confirm result=${txResult} (0=ok, anything else = chip rejected the queue add)`);
+  // DSAP-DATA-TX.confirm payload format: PDU_ID(2 LE) + result(1) + queue_capacity(1)
+  const echoedPdu = confirm.payload.readUInt16LE(0);
+  const txResult  = confirm.payload[2];
+  const queueCap  = confirm.payload[3];
+  console.log(`[unlock] TX confirm pdu=0x${echoedPdu.toString(16).padStart(4, '0')} result=${txResult} queue_cap=${queueCap}`);
   if (txResult !== 0) {
+    console.log('[unlock] chip rejected the TX. Result code reference:');
+    console.log('  1=encrypt err, 2=qos err, 3=len err, 4=hops err, 5=opts err, 6=queue full,');
+    console.log('  7=stack stopped, 8=invalid src/dst ep, 9=no route, ...');
     await t.close();
     return 3;
   }
