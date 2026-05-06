@@ -93,8 +93,9 @@ async function main(): Promise<number> {
 
     if (arg === '--listen') { await t.close(); return 0; }
 
-    // --auto: pick the most-active non-self node and unlock it immediately
-    const myNodeAddr = 0x00159e43; // gateway's own address (skip)
+    // --auto: pick the most-active non-self node and immediately fire unlock
+    // through the SAME transport (don't close — we'd lose the just-built route).
+    const myNodeAddr = 0x00159e43;
     const target = sorted.find(([a]) => a !== myNodeAddr);
     if (!target) {
       console.log('[auto] no candidate target heard — aborting');
@@ -102,11 +103,39 @@ async function main(): Promise<number> {
       return 5;
     }
     const [autoAddr] = target;
-    console.log(`[auto] unlocking most-active target 0x${autoAddr.toString(16).padStart(8, '0')}`);
+    console.log(`[auto] firing unlock at 0x${autoAddr.toString(16).padStart(8, '0')} (heard ${target[1]}x in last ${seconds}s — route is fresh)`);
+
+    let unlockSentAt = Date.now();
+    let response: DataRxIndication | null = null;
+    t.on('indication', (p) => {
+      if (p.primitive !== PRIM.DSAP_DATA_RX_INDICATION) return;
+      const ind = parseDsapDataRx(p.payload);
+      if (!ind || ind.srcAddress !== autoAddr) return;
+      if (Date.now() - unlockSentAt < 10) return; // ignore RX-in-flight at TX moment
+      response = ind;
+      console.log(`[auto]   RESPONSE  hops=${ind.hopCount}  t=${ind.travelTimeMs}ms  apdu(${ind.apdu.length})=${ind.apdu.toString('hex')}`);
+    });
+    let pdu = 0x0001;
+    await t.send((fid) => buildDsapDataTx(fid, {
+      pduId: pdu++, sourceEndpoint: SRC_EP, destAddress: autoAddr, destEndpoint: DST_EP,
+      qos: 1, requestTxIndication: false, apdu: UNLOCK_APDU,
+    }), TX_TIMEOUT_MS).catch(e => console.log(`[auto]   TX confirm timeout: ${e.message} (proceeding)`));
+    unlockSentAt = Date.now();
+
+    const waitStart = Date.now();
+    const r = (): DataRxIndication | null => response;
+    while (!r() && Date.now() - waitStart < RX_WAIT_MS) {
+      try { await t.pollIndications(); } catch { /* ignore */ }
+      await new Promise(rr => setTimeout(rr, POLL_PERIOD_MS));
+    }
     await t.close();
-    // Re-invoke main flow with computed short_mac (last 3 hex bytes of address)
-    process.argv[2] = autoAddr.toString(16).padStart(8, '0').slice(-6).toUpperCase();
-    return await main();
+    const got = r();
+    if (got) {
+      console.log(`[auto] SUCCESS — first response byte 0x${got.apdu[0].toString(16).padStart(2,'0')}`);
+      return 0;
+    }
+    console.log('[auto] no response from target within timeout');
+    return 1;
   }
 
   const { shortMac, address } = parseTarget(arg);
