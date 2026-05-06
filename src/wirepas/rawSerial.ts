@@ -26,9 +26,10 @@ export class RawSerial extends EventEmitter {
   readonly path:     string;
   readonly baudRate: number;
   private  debug:    boolean;
-  private  fd:       number = -1;
-  private  reader:   fs.ReadStream | null = null;
-  private  _isOpen:  boolean = false;
+  private  fd:        number = -1;
+  private  pollTimer: NodeJS.Timeout | null = null;
+  private  rxBuf:     Buffer = Buffer.alloc(4096);
+  private  _isOpen:   boolean = false;
 
   constructor(opts: RawSerialOptions) {
     super();
@@ -47,20 +48,15 @@ export class RawSerial extends EventEmitter {
       // spd_cust trick: setserial with baud_base/divisor, then stty 38400.
       this.configureBaud(this.baudRate);
 
-      // O_NONBLOCK so libuv can poll it without blocking the event loop.
+      // O_NONBLOCK + we explicitly poll via fs.read. fs.createReadStream
+      // doesn't reliably emit 'data' for character devices in Node 16/20.
       this.fd = fs.openSync(
         this.path,
         fs.constants.O_RDWR | fs.constants.O_NOCTTY | fs.constants.O_NONBLOCK,
       );
 
-      // ReadStream backed by the fd; autoClose=false because we own the fd.
-      this.reader = fs.createReadStream('', { fd: this.fd, autoClose: false, highWaterMark: 256 });
-      this.reader.on('data', (chunk: Buffer | string) => {
-        this.emit('data', typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-      });
-      this.reader.on('error', (e) => this.emit('error', e));
-
       this._isOpen = true;
+      this.pollTimer = setInterval(() => this.pump(), 20);
       done(null);
     } catch (e) {
       done(e instanceof Error ? e : new Error(String(e)));
@@ -131,14 +127,25 @@ export class RawSerial extends EventEmitter {
     const done = cb ?? (() => {});
     if (!this._isOpen) return done(null);
     this._isOpen = false;
-    try { this.reader?.destroy(); } catch {}
-    this.reader = null;
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
     try {
       if (this.fd >= 0) fs.closeSync(this.fd);
       this.fd = -1;
       done(null);
     } catch (e) {
       done(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  /** Polled non-blocking read. Emits 'data' for any bytes available. */
+  private pump(): void {
+    if (!this._isOpen || this.fd < 0) return;
+    try {
+      const n = fs.readSync(this.fd, this.rxBuf, 0, this.rxBuf.length, null);
+      if (n > 0) this.emit('data', Buffer.from(this.rxBuf.subarray(0, n)));
+    } catch (e: any) {
+      // EAGAIN/EWOULDBLOCK is the normal "no data right now" case
+      if (e?.code !== 'EAGAIN' && e?.code !== 'EWOULDBLOCK') this.emit('error', e);
     }
   }
 }
