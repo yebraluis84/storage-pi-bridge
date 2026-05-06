@@ -200,12 +200,10 @@ export class WirepasTransport extends EventEmitter {
       }
       // Unmatched confirm — fall through as if it's an indication
     } else {
-      // Indication from chip. Only DSAP_DATA_RX_INDICATION (0x03) needs an ack
-      // per gatewaygo's wire pattern — other indications (0x07 state, 0x02 tx
-      // ind) are not acked and acking them seems to wedge the chip.
-      if (prim.primitive === PRIM.DSAP_DATA_RX_INDICATION) {
-        this.sendIndicationAck(prim.primitive, true);
-      }
+      // Indication from chip. Every indication needs an ack per Wirepas spec —
+      // if we don't, the chip wedges and retransmits the same indication
+      // continuously instead of advancing to the next queued one.
+      this.sendIndicationAck(prim.primitive, true);
     }
     this.emit('indication', prim);
   }
