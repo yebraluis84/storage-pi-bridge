@@ -29,6 +29,8 @@ export const PRIM = {
   MSAP_STACK_START_CONFIRM: 0x85,
   MSAP_STACK_STOP_REQ:      0x06,
   MSAP_STACK_STOP_CONFIRM:  0x86,
+  /** Async indication seen on first contact, payload typically 2 bytes. */
+  MSAP_STATE_INDICATION:    0x07,
   MSAP_ATTR_READ_REQ:       0x0c,
   MSAP_ATTR_READ_CONFIRM:   0x8c,
   MSAP_ATTR_WRITE_REQ:      0x0b,

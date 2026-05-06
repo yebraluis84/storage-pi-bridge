@@ -42,18 +42,10 @@ export class RawSerial extends EventEmitter {
   open(cb?: (err?: Error | null) => void): void {
     const done = cb ?? (() => {});
     try {
-      // Configure the tty: raw mode, requested baud, 8N1, no flow control.
-      const args = [
-        '-F', this.path, 'raw', '-echo', String(this.baudRate),
-        'cs8', '-cstopb', '-parenb', '-ixon', '-ixoff', '-crtscts',
-      ];
-      if (this.debug) console.log('[raw-serial] stty', args.join(' '));
-      const r = spawnSync('stty', args);
-      if (r.status !== 0) {
-        return done(new Error(
-          `stty failed (status=${r.status}): ${r.stderr?.toString().trim() || r.stdout?.toString().trim()}`,
-        ));
-      }
+      // Configure the tty. For non-standard bauds (e.g. Wirepas's 125000)
+      // stty can't accept the rate directly, so we use the kernel's
+      // spd_cust trick: setserial with baud_base/divisor, then stty 38400.
+      this.configureBaud(this.baudRate);
 
       // O_NONBLOCK so libuv can poll it without blocking the event loop.
       this.fd = fs.openSync(
@@ -79,6 +71,60 @@ export class RawSerial extends EventEmitter {
     const done = cb ?? (() => {});
     if (!this._isOpen) return done(new Error('not open'));
     fs.write(this.fd, Buffer.from(data), 0, data.length, null, (err) => done(err ?? null));
+  }
+
+  /**
+   * Set the line to the requested baud. For rates `stty` accepts directly
+   * (115200, 230400, 460800, 921600, 1000000, etc.) we set them straight.
+   * For non-standard rates (e.g. Wirepas's 125000) we use Linux's spd_cust
+   * trick: setserial picks a divisor against the UART's baud_base, then we
+   * tell stty 38400 — the kernel substitutes the custom rate.
+   */
+  private configureBaud(baud: number): void {
+    const STANDARD = new Set([
+      50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600,
+      19200, 38400, 57600, 115200, 230400, 460800, 500000, 576000, 921600,
+      1000000, 1152000, 1500000, 2000000, 2500000, 3000000, 3500000, 4000000,
+    ]);
+
+    let lineBaud: number = baud;
+
+    if (!STANDARD.has(baud)) {
+      // Non-standard baud — drive it through spd_cust + stty 38400.
+      // Discover the UART's baud_base via setserial -a.
+      const a = spawnSync('setserial', ['-a', this.path]);
+      if (a.status !== 0) {
+        throw new Error(`setserial -a ${this.path} failed: ${a.stderr?.toString().trim()}`);
+      }
+      const m = a.stdout.toString().match(/Baud_base:\s*(\d+)/);
+      if (!m) throw new Error(`could not parse Baud_base from setserial output:\n${a.stdout}`);
+      const baudBase = Number(m[1]);
+      if (baudBase % baud !== 0) {
+        throw new Error(`baud ${baud} not realizable from baud_base=${baudBase} (non-integer divisor)`);
+      }
+      const divisor = baudBase / baud;
+      if (this.debug) console.log(`[raw-serial] setserial baud_base=${baudBase} divisor=${divisor} -> ${baud} baud`);
+      const s = spawnSync('setserial', [
+        this.path, 'baud_base', String(baudBase), 'divisor', String(divisor), 'spd_cust',
+      ]);
+      if (s.status !== 0) {
+        throw new Error(`setserial spd_cust failed: ${s.stderr?.toString().trim()}`);
+      }
+      lineBaud = 38400; // tell stty 38400; kernel substitutes our custom rate
+    } else {
+      // Standard baud — make sure no leftover spd_cust is in effect.
+      spawnSync('setserial', [this.path, 'spd_normal']);
+    }
+
+    const args = [
+      '-F', this.path, 'raw', '-echo', String(lineBaud),
+      'cs8', '-cstopb', '-parenb', '-ixon', '-ixoff', '-crtscts',
+    ];
+    if (this.debug) console.log('[raw-serial] stty', args.join(' '));
+    const r = spawnSync('stty', args);
+    if (r.status !== 0) {
+      throw new Error(`stty failed (status=${r.status}): ${r.stderr?.toString().trim() || r.stdout?.toString().trim()}`);
+    }
   }
 
   close(cb?: (err?: Error | null) => void): void {
