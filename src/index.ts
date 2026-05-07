@@ -15,6 +15,8 @@
 
 import dotenv from 'dotenv';
 import WebSocket from 'ws';
+import { exec } from 'child_process';
+import * as net from 'net';
 import { unlockLock } from './ble';
 
 dotenv.config();
@@ -28,7 +30,7 @@ if (!TOKEN || !WS_URL) {
 }
 
 interface IncomingMessage {
-  type:                'unlock' | 'ping';
+  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo';
   requestId?:          string;
   mac?:                string;
   offlineKey?:         string;
@@ -36,7 +38,7 @@ interface IncomingMessage {
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong';
+  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
@@ -100,6 +102,30 @@ function connect(): void {
         break;
       }
 
+      case 'restart_gatewaygo': {
+        console.log('[ws] restart_gatewaygo requested');
+        const result = await restartGatewaygo();
+        ws.send(JSON.stringify({
+          type:      'restart_gatewaygo_result',
+          requestId: msg.requestId,
+          success:   result.success,
+          message:   result.message,
+        } satisfies OutgoingMessage));
+        break;
+      }
+
+      case 'probe_gatewaygo': {
+        console.log('[ws] probe_gatewaygo requested');
+        const result = await probeGatewaygo();
+        ws.send(JSON.stringify({
+          type:      'probe_gatewaygo_result',
+          requestId: msg.requestId,
+          success:   result.success,
+          message:   result.message,
+        } satisfies OutgoingMessage));
+        break;
+      }
+
       default:
         console.warn(`[ws] unknown message type: ${(msg as { type?: string }).type}`);
     }
@@ -119,3 +145,55 @@ function connect(): void {
 connect();
 
 console.log('Pi Bridge is running. Press Ctrl+C to exit.');
+
+// ─── Diagnostic / control helpers ───────────────────────────────────
+
+/** Restart the gatewaygo systemd service. Pi-bridge runs as root, so this is allowed. */
+function restartGatewaygo(): Promise<{ success: boolean; message: string }> {
+  return new Promise((resolve) => {
+    exec('systemctl restart gatewaygo', { timeout: 30_000 }, (err, _stdout, stderr) => {
+      if (err) {
+        resolve({ success: false, message: `restart failed: ${stderr.trim() || err.message}` });
+        return;
+      }
+      resolve({ success: true, message: 'gatewaygo restarted' });
+    });
+  });
+}
+
+/** Probe gatewaygo's local CLI by sending `version\n` on 127.0.0.1:5299.
+ *  Useful for telling whether gatewaygo is actually responsive (vs. just accepting connections). */
+function probeGatewaygo(): Promise<{ success: boolean; message: string }> {
+  return new Promise((resolve) => {
+    const sock = new net.Socket();
+    let buf = '';
+    let done = false;
+    const finish = (success: boolean, message: string) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch { /* ignore */ }
+      resolve({ success, message });
+    };
+    const timer = setTimeout(() => finish(false, 'probe timeout (3s) — gatewaygo accepted but did not respond'), 3_000);
+
+    sock.on('connect', () => sock.write('version\n'));
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      // Any response means gatewaygo's CLI is alive. Trim and return first line(s).
+      if (buf.length > 0) {
+        clearTimeout(timer);
+        const head = buf.trim().split('\n').slice(0, 3).join(' | ').slice(0, 240);
+        finish(true, head || '(empty response)');
+      }
+    });
+    sock.on('end', () => {
+      clearTimeout(timer);
+      if (buf.length === 0) finish(false, 'gatewaygo closed without responding');
+    });
+    sock.on('error', (err) => {
+      clearTimeout(timer);
+      finish(false, `connect error: ${err.message}`);
+    });
+    sock.connect(5299, '127.0.0.1');
+  });
+}
