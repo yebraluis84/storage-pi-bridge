@@ -29,6 +29,15 @@ if (!TOKEN || !WS_URL) {
   process.exit(1);
 }
 
+// Don't let an unhandled async error kill the bridge. Log it loudly so we
+// can fix the underlying bug, but keep the WebSocket and BLE loops alive.
+process.on('unhandledRejection', (reason) => {
+  console.error('[bridge] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[bridge] uncaughtException:', err);
+});
+
 interface IncomingMessage {
   type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo';
   requestId?:          string;
@@ -47,7 +56,11 @@ interface OutgoingMessage {
   bridgeId?:   string;
 }
 
-const RECONNECT_DELAY_MS = 5_000;
+const RECONNECT_DELAY_MS    = 5_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;  // send a WS ping every 30s
+// If no pong arrives between heartbeats, the connection is stale (likely
+// half-open after a Railway redeploy or a NAT timeout). Terminate the
+// socket so the close handler triggers a reconnect.
 
 function connect(): void {
   console.log(`[ws] connecting to ${WS_URL}...`);
@@ -55,14 +68,39 @@ function connect(): void {
     headers: { 'X-Bridge-Token': TOKEN! },
   });
 
+  // Heartbeat watchdog. `alive` flips false on each ping; the next pong
+  // flips it back. If a full interval passes with no pong, the socket
+  // is dead and we force a reconnect.
+  let alive = true;
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  };
+  const startHeartbeat = () => {
+    alive = true;
+    heartbeatTimer = setInterval(() => {
+      if (!alive) {
+        console.warn('[ws] no pong in last interval — terminating stale socket');
+        try { ws.terminate(); } catch { /* ignore */ }
+        return;  // close handler will reconnect
+      }
+      alive = false;
+      try { ws.ping(); } catch { /* ignore */ }
+    }, HEARTBEAT_INTERVAL_MS);
+  };
+
   ws.on('open', () => {
     console.log('[ws] connected');
+    startHeartbeat();
     const hello: OutgoingMessage = {
       type:     'hello',
       bridgeId: process.env.BRIDGE_ID ?? 'pi-1',
     };
     ws.send(JSON.stringify(hello));
   });
+
+  // ws library's `pong` event fires when the server replies to our ping.
+  ws.on('pong', () => { alive = true; });
 
   ws.on('message', async (buf) => {
     let msg: IncomingMessage;
@@ -132,6 +170,7 @@ function connect(): void {
   });
 
   ws.on('close', (code, reason) => {
+    stopHeartbeat();
     console.warn(`[ws] disconnected (${code} ${reason}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
     setTimeout(connect, RECONNECT_DELAY_MS);
   });
