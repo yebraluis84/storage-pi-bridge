@@ -39,15 +39,21 @@ process.on('uncaughtException', (err) => {
 });
 
 interface IncomingMessage {
-  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo';
+  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay';
   requestId?:          string;
   mac?:                string;
   offlineKey?:         string;
   offlineUnlockCmd?:   string;
+  // pulse_relay
+  host?:               string;
+  channel?:            number;
+  pulseSeconds?:       number;
+  user?:               string | null;
+  password?:           string | null;
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result';
+  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
@@ -164,6 +170,33 @@ function connect(): void {
         break;
       }
 
+      case 'pulse_relay': {
+        if (!msg.host || typeof msg.pulseSeconds !== 'number') {
+          ws.send(JSON.stringify({
+            type:      'pulse_relay_result',
+            requestId: msg.requestId,
+            success:   false,
+            message:   'Missing host/pulseSeconds in pulse_relay request',
+          } satisfies OutgoingMessage));
+          return;
+        }
+        console.log(`[ws] pulse_relay -> ${msg.host} ch${msg.channel ?? 0} for ${msg.pulseSeconds}s`);
+        const result = await pulseShellyRelay({
+          host:         msg.host,
+          channel:      msg.channel ?? 0,
+          pulseSeconds: msg.pulseSeconds,
+          user:         msg.user ?? null,
+          password:     msg.password ?? null,
+        });
+        ws.send(JSON.stringify({
+          type:      'pulse_relay_result',
+          requestId: msg.requestId,
+          success:   result.success,
+          message:   result.message,
+        } satisfies OutgoingMessage));
+        break;
+      }
+
       default:
         console.warn(`[ws] unknown message type: ${(msg as { type?: string }).type}`);
     }
@@ -235,4 +268,49 @@ function probeGatewaygo(): Promise<{ success: boolean; message: string }> {
     });
     sock.connect(5299, '127.0.0.1');
   });
+}
+
+/**
+ * Pulse a Shelly Plus 1 / 1PM relay over the local LAN. Uses Shelly's
+ * Gen2 RPC HTTP API:
+ *   GET http://<host>/rpc/Switch.Set?id=<ch>&on=true&toggle_after=<sec>
+ * which turns the relay on then back off after `toggle_after` seconds —
+ * exactly the same as a momentary press of a wall button.
+ *
+ * Optional basic-auth: Shelly Gen2 only requires a password (username is
+ * always "admin"); both are passed through if configured.
+ */
+async function pulseShellyRelay(opts: {
+  host:         string;
+  channel:      number;
+  pulseSeconds: number;
+  user:         string | null;
+  password:     string | null;
+}): Promise<{ success: boolean; message: string }> {
+  // Cap the pulse to a sane range. Anything below 0.1s is unreliable;
+  // anything above 5s and you risk the door command repeating.
+  const pulse = Math.max(0.1, Math.min(opts.pulseSeconds, 5));
+  const url = `http://${opts.host}/rpc/Switch.Set?id=${opts.channel}&on=true&toggle_after=${pulse}`;
+
+  const headers: Record<string, string> = {};
+  if (opts.password) {
+    const user = opts.user || 'admin';
+    headers['Authorization'] = 'Basic ' + Buffer.from(`${user}:${opts.password}`).toString('base64');
+  }
+
+  // Node 18+ has fetch built-in. Pi-bridge runs node 20.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5_000);
+  try {
+    const r = await fetch(url, { headers, signal: ac.signal });
+    clearTimeout(timer);
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      return { success: false, message: `Shelly HTTP ${r.status}: ${body.slice(0, 200)}` };
+    }
+    return { success: true, message: `pulsed ${opts.host} ch${opts.channel} for ${pulse}s` };
+  } catch (err) {
+    clearTimeout(timer);
+    return { success: false, message: `Shelly fetch failed: ${(err as Error).message}` };
+  }
 }
