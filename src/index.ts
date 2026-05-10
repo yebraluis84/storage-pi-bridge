@@ -18,6 +18,7 @@ import WebSocket from 'ws';
 import { exec } from 'child_process';
 import * as net from 'net';
 import { unlockLock } from './ble';
+import { startLockStatePoller } from './lockStates';
 
 dotenv.config();
 
@@ -53,7 +54,7 @@ interface IncomingMessage {
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result';
+  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
@@ -95,14 +96,18 @@ function connect(): void {
     }, HEARTBEAT_INTERVAL_MS);
   };
 
+  let stopLockStatePoller: (() => void) | null = null;
+
   ws.on('open', () => {
     console.log('[ws] connected');
     startHeartbeat();
+    const bridgeId = process.env.BRIDGE_ID ?? 'pi-1';
     const hello: OutgoingMessage = {
       type:     'hello',
-      bridgeId: process.env.BRIDGE_ID ?? 'pi-1',
+      bridgeId,
     };
     ws.send(JSON.stringify(hello));
+    stopLockStatePoller = startLockStatePoller({ ws, bridgeId });
   });
 
   // ws library's `pong` event fires when the server replies to our ping.
@@ -204,6 +209,7 @@ function connect(): void {
 
   ws.on('close', (code, reason) => {
     stopHeartbeat();
+    if (stopLockStatePoller) { stopLockStatePoller(); stopLockStatePoller = null; }
     console.warn(`[ws] disconnected (${code} ${reason}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
     setTimeout(connect, RECONNECT_DELAY_MS);
   });

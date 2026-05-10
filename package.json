@@ -15,11 +15,13 @@
     "wirepas:unlock": "tsx src/wirepas/wirepasUnlock.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^8.7.0",
     "dotenv": "^16.4.5",
     "node-ble": "^1.13.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
     "@types/node": "^20.11.24",
     "@types/ws": "^8.5.13",
     "tsx": "^4.7.1",
