@@ -24,11 +24,14 @@ const DEFAULT_INTERVAL   = 30_000;
 const WS_OPEN            = 1;
 
 interface LockRow {
-  mac:       string;   // full MAC, colon-separated, uppercase (e.g. "D4:16:E9:55:6D:8C")
-  short:     string;   // 6-hex no separators, uppercase ("556D8C")
-  state:     'LOCKED' | 'UNLOCKED';
-  updatedAt: string;   // raw lock_state_updated from gatewaygo
-  hops:      number;
+  mac:         string;   // full MAC, colon-separated, uppercase (e.g. "D4:16:E9:55:6D:8C")
+  short:       string;   // 6-hex no separators, uppercase ("556D8C")
+  state:       'LOCKED' | 'UNLOCKED';
+  updatedAt:   string;   // raw lock_state_updated from gatewaygo
+  hops:        number;
+  nextHopMac:  string;   // mesh address of the next routing hop toward this gateway
+  nextHopRssi: number;   // dBm of that hop; closer to 0 = stronger
+  linkQuality: number;   // gatewaygo's composite quality score; -1 if unknown
 }
 
 interface LockStatesMessage {
@@ -63,7 +66,10 @@ export function startLockStatePoller(opts: {
                 short_mac          AS short,
                 lock_state         AS state,
                 lock_state_updated AS updatedAt,
-                hops               AS hops
+                hops               AS hops,
+                next_hop_mac       AS nextHopMac,
+                next_hop_rssi      AS nextHopRssi,
+                link_quality       AS linkQuality
            FROM master_lock_list
           WHERE lock_state IN ('LOCKED','UNLOCKED')`
       ).all() as LockRow[];
