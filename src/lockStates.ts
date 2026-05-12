@@ -15,9 +15,30 @@
  * gatewaygo's writes. That's fine.
  */
 
-import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import type { WebSocket } from 'ws';
+
+// Local type stub for better-sqlite3 — narrowest surface we actually use.
+// Avoids `import type` from 'better-sqlite3' so tsc still compiles on
+// gateways where the package + its types failed to install (e.g. the .249
+// libc-detection misfire that's been stuck since 2026-05-10).
+interface DbInstance {
+  prepare(sql: string): { all(): unknown[] };
+  close(): void;
+}
+type DbCtor = new (path: string, opts: { readonly: boolean; fileMustExist: boolean }) => DbInstance;
+
+// Dynamic require so the bridge keeps running on gateways where the
+// better-sqlite3 install failed. Without this, a missing module crashes the
+// bridge entirely; with it, the poller just no-ops and the rest of the
+// bridge (gatewaygo-CLI unlocks, WS messages) stays up.
+let DatabaseCtor: DbCtor | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  DatabaseCtor = require('better-sqlite3') as DbCtor;
+} catch (err) {
+  console.warn(`[lock-states] better-sqlite3 unavailable, poller disabled: ${(err as Error).message}`);
+}
 
 const DEFAULT_DB_PATH    = '/usr/local/bin/gw.sqlite';
 const DEFAULT_INTERVAL   = 30_000;
@@ -52,13 +73,15 @@ export function startLockStatePoller(opts: {
   dbPath?:   string;
   intervalMs?: number;
 }): () => void {
-  const dbPath     = opts.dbPath ?? process.env.GW_SQLITE_PATH ?? DEFAULT_DB_PATH;
+  if (!DatabaseCtor) return () => {};   // better-sqlite3 isn't loadable here — no-op
+  const Database    = DatabaseCtor;
+  const dbPath      = opts.dbPath ?? process.env.GW_SQLITE_PATH ?? DEFAULT_DB_PATH;
   const envInterval = Number(process.env.LOCK_STATES_POLL_MS);
   const intervalMs  = opts.intervalMs ?? (Number.isFinite(envInterval) && envInterval > 0 ? envInterval : DEFAULT_INTERVAL);
 
   const tick = () => {
     if (opts.ws.readyState !== WS_OPEN) return;
-    let db: Database.Database | null = null;
+    let db: DbInstance | null = null;
     try {
       if (!fs.existsSync(dbPath)) {
         console.warn(`[lock-states] db not found at ${dbPath}`);
