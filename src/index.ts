@@ -17,6 +17,7 @@ import dotenv from 'dotenv';
 import WebSocket from 'ws';
 import { exec } from 'child_process';
 import * as net from 'net';
+import * as http from 'http';
 import { unlockLock } from './ble';
 import { startLockStatePoller } from './lockStates';
 
@@ -296,7 +297,7 @@ async function pulseShellyRelay(opts: {
   // Cap the pulse to a sane range. Anything below 0.1s is unreliable;
   // anything above 5s and you risk the door command repeating.
   const pulse = Math.max(0.1, Math.min(opts.pulseSeconds, 5));
-  const url = `http://${opts.host}/rpc/Switch.Set?id=${opts.channel}&on=true&toggle_after=${pulse}`;
+  const path  = `/rpc/Switch.Set?id=${opts.channel}&on=true&toggle_after=${pulse}`;
 
   const headers: Record<string, string> = {};
   if (opts.password) {
@@ -304,19 +305,33 @@ async function pulseShellyRelay(opts: {
     headers['Authorization'] = 'Basic ' + Buffer.from(`${user}:${opts.password}`).toString('base64');
   }
 
-  // Node 18+ has fetch built-in. Pi-bridge runs node 20.
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 5_000);
-  try {
-    const r = await fetch(url, { headers, signal: ac.signal });
-    clearTimeout(timer);
-    if (!r.ok) {
-      const body = await r.text().catch(() => '');
-      return { success: false, message: `Shelly HTTP ${r.status}: ${body.slice(0, 200)}` };
-    }
-    return { success: true, message: `pulsed ${opts.host} ch${opts.channel} for ${pulse}s` };
-  } catch (err) {
-    clearTimeout(timer);
-    return { success: false, message: `Shelly fetch failed: ${(err as Error).message}` };
-  }
+  // Use the built-in `http` module instead of global `fetch`. Some Pis in
+  // the fleet are still on Node < 18 where `fetch` is undefined.
+  return new Promise((resolve) => {
+    const req = http.request({
+      host:    opts.host,
+      port:    80,
+      path,
+      method:  'GET',
+      headers,
+      timeout: 5_000,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        const status = res.statusCode ?? 0;
+        if (status >= 200 && status < 300) {
+          resolve({ success: true,  message: `pulsed ${opts.host} ch${opts.channel} for ${pulse}s` });
+        } else {
+          resolve({ success: false, message: `Shelly HTTP ${status}: ${body.slice(0, 200)}` });
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout after 5s')));
+    req.on('error', (err) => {
+      resolve({ success: false, message: `Shelly request failed: ${err.message}` });
+    });
+    req.end();
+  });
 }
