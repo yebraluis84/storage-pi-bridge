@@ -115,6 +115,11 @@ function connect(): void {
   ws.on('pong', () => { alive = true; });
 
   ws.on('message', async (buf) => {
+    // Any inbound message proves the connection is alive. Without this,
+    // the watchdog at HEARTBEAT_INTERVAL_MS relies solely on protocol-level
+    // pong frames, which Railway's edge intermittently drops, causing the
+    // daemon to terminate healthy sockets every ~60s and reconnect.
+    alive = true;
     let msg: IncomingMessage;
     try { msg = JSON.parse(buf.toString()) as IncomingMessage; }
     catch { console.warn('[ws] bad JSON'); return; }
