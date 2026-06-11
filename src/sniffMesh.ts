@@ -63,9 +63,14 @@ export async function captureGatewaygoUart(seconds: number): Promise<{ data: Buf
   const outPath = `/tmp/sniff-${Date.now()}-${pid}.strace`;
   console.log(`[sniff-mesh] strace -p ${pid} -> ${outPath} for ${seconds}s`);
 
+  // -f is critical: gatewaygo is a Go binary with ~9 OS threads (the runtime
+  // spreads goroutines across them). Without -f, strace only watches the
+  // main thread and misses the MQTT read + the chip-side write that happen
+  // on worker threads. With -f, strace follows all threads of the PID.
   const proc = spawn('strace', [
     '-p', String(pid),
-    '-e', 'trace=read,write',
+    '-f',
+    '-e', 'trace=read,write,readv,writev,recvfrom,sendto',
     '-y', '-x', '-s', '4096',
     '-o', outPath,
   ], { stdio: ['ignore', 'inherit', 'inherit'] });
