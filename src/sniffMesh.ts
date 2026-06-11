@@ -33,9 +33,20 @@ export async function captureGatewaygoUart(seconds: number): Promise<{ data: Buf
     throw new Error(`seconds must be ${MIN_SECONDS}..${MAX_SECONDS}, got ${seconds}`);
   }
 
-  // 1. Find gatewaygo's PID. Match on the binary name regardless of full path
-  //    (could be /usr/local/bin/gatewaygo, /usr/local/bin/gatewaygo-arm-bin, etc.)
-  const { stdout: pidOut } = await exec('pgrep -f "gatewaygo" || true');
+  // 0. Pre-flight: strace must be installed. On the BPI image it's not by
+  //    default — `apt-get install -y strace` is a one-shot fix per gateway.
+  //    Pre-checking here returns a clean error instead of a spawn ENOENT
+  //    that the spawn() error event would otherwise turn into uncaught.
+  try {
+    await exec('command -v strace');
+  } catch {
+    throw new Error('strace not installed on this bridge — run `apt-get install -y strace`');
+  }
+
+  // 1. Find gatewaygo's PID. Match the binary PATH not the bare name —
+  //    pi-bridge spawns `tail -F /var/log/log_gatewaygo.log` for its CLI
+  //    bridge, and bare `pgrep -f gatewaygo` would catch that too.
+  const { stdout: pidOut } = await exec('pgrep -f "/usr/local/bin/gatewaygo" || true');
   const pids = pidOut.trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isFinite);
   if (pids.length === 0) {
     throw new Error('gatewaygo not running on this bridge — nothing to strace');
@@ -59,6 +70,13 @@ export async function captureGatewaygoUart(seconds: number): Promise<{ data: Buf
     '-o', outPath,
   ], { stdio: ['ignore', 'inherit', 'inherit'] });
 
+  // Capture spawn 'error' events so they don't become uncaughtException on
+  // the bridge — they fire BEFORE 'exit' on a failed spawn (ENOENT, EPERM).
+  // We listen with .once and store the result; the early-exit race below
+  // surfaces it as a clean thrown error.
+  let spawnError: Error | null = null;
+  proc.once('error', (err) => { spawnError = err; });
+
   // strace attaches with PTRACE_ATTACH. If the kernel rejects (ptrace_scope
   // restriction, wrong user), strace exits non-zero almost immediately —
   // catch that and surface a clear error.
@@ -67,6 +85,9 @@ export async function captureGatewaygoUart(seconds: number): Promise<{ data: Buf
     earlyExit,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000)),
   ]);
+  if (spawnError) {
+    throw new Error(`strace failed to spawn: ${(spawnError as Error).message}`);
+  }
   if (settled !== null) {
     throw new Error(`strace exited immediately with code ${settled} — likely permission / ptrace_scope issue`);
   }
