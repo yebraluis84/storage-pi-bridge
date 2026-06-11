@@ -20,6 +20,7 @@ import * as net from 'net';
 import * as http from 'http';
 import { unlockLock } from './ble';
 import { startLockStatePoller } from './lockStates';
+import { captureGatewaygoUart } from './sniffMesh';
 
 dotenv.config();
 
@@ -41,7 +42,7 @@ process.on('uncaughtException', (err) => {
 });
 
 interface IncomingMessage {
-  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay';
+  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay' | 'sniff_mesh';
   requestId?:          string;
   mac?:                string;
   offlineKey?:         string;
@@ -52,16 +53,22 @@ interface IncomingMessage {
   pulseSeconds?:       number;
   user?:               string | null;
   password?:           string | null;
+  // sniff_mesh
+  seconds?:            number;
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states';
+  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states' | 'sniff_mesh_result';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
   duration?:   number;
   battery?:    number;
   bridgeId?:   string;
+  // sniff_mesh_result — gzipped strace, base64 encoded
+  dataBase64?: string;
+  rawBytes?:   number;
+  pid?:        number;
 }
 
 const RECONNECT_DELAY_MS    = 5_000;
@@ -178,6 +185,33 @@ function connect(): void {
           success:   result.success,
           message:   result.message,
         } satisfies OutgoingMessage));
+        break;
+      }
+
+      case 'sniff_mesh': {
+        const seconds = typeof msg.seconds === 'number' ? msg.seconds : 60;
+        console.log(`[ws] sniff_mesh requested for ${seconds}s`);
+        try {
+          const { data, rawBytes, pid } = await captureGatewaygoUart(seconds);
+          ws.send(JSON.stringify({
+            type:       'sniff_mesh_result',
+            requestId:  msg.requestId,
+            success:    true,
+            message:    `captured ${rawBytes} bytes (gzipped ${data.length})`,
+            dataBase64: data.toString('base64'),
+            rawBytes,
+            pid,
+          } satisfies OutgoingMessage));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(`[ws] sniff_mesh failed: ${message}`);
+          ws.send(JSON.stringify({
+            type:      'sniff_mesh_result',
+            requestId: msg.requestId,
+            success:   false,
+            message,
+          } satisfies OutgoingMessage));
+        }
         break;
       }
 
