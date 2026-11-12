@@ -57,6 +57,123 @@ function parseTarget(s: string): { shortMac: string; address: number } {
   return { shortMac, address };
 }
 
+export interface MeshUnlockResult {
+  success: boolean;
+  message: string;
+  /** First byte of the lock's response APDU (hex), when it replied. */
+  responseByte?: string;
+}
+
+/**
+ * Unlock a single lock over the Wirepas mesh using the network cipher key.
+ *
+ * This is the library form of main()'s single-lock path, callable from the
+ * pi-bridge WebSocket handler. It opens its own transport, does route
+ * discovery + time-sync broadcasts, fires the generic unlock APDU, then waits
+ * for the lock's response — and unlike the phone BLE path it actually inspects
+ * that response (gatewaygo treats first byte 0x50/0x75 as a confirmed open), so
+ * it never reports a false success. Opens/closes its own serial transport and
+ * never calls process.exit.
+ *
+ * NOTE: uses WIREPAS_PORT (default /dev/ttyS3). gatewaygo talks to the chip on
+ * /dev/ttyS6; if they share a UART on a given unit, gatewaygo may need to be
+ * stopped for the duration of the unlock. Determined per-unit on-site.
+ */
+export async function meshUnlock(
+  target: string,
+  opts: { skipListen?: boolean } = {},
+): Promise<MeshUnlockResult> {
+  let parsed: { shortMac: string; address: number };
+  try {
+    parsed = parseTarget(target);
+  } catch (e) {
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+  const { shortMac, address } = parsed;
+  const skipListen = opts.skipListen ?? false;
+
+  const t = new WirepasTransport({ path: PORT, baudRate: BAUD, debug: false, pollIntervalMs: 0 });
+  try {
+    await t.open();
+  } catch (e) {
+    return { success: false, message: `serial open failed on ${PORT}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const heardFrom = new Set<number>();
+  let unlockSentAt: number | null = null;
+  let response: DataRxIndication | null = null;
+  t.on('indication', (p) => {
+    if (p.primitive !== PRIM.DSAP_DATA_RX_INDICATION) return;
+    const ind = parseDsapDataRx(p.payload);
+    if (!ind) return;
+    heardFrom.add(ind.srcAddress);
+    if (ind.srcAddress === address && unlockSentAt !== null && !response) {
+      response = ind;
+    }
+  });
+
+  try {
+    // ===== Phase 1: route discovery =====
+    if (!skipListen) {
+      const listenStart = Date.now();
+      const LISTEN_FOR_TARGET_MS = 30_000;
+      while (!heardFrom.has(address) && Date.now() - listenStart < LISTEN_FOR_TARGET_MS) {
+        try { await t.pollIndications(); } catch { /* ignore */ }
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (!heardFrom.has(address)) {
+        return { success: false, message: `lock ${shortMac} not reachable on mesh (no beacon in 30s)` };
+      }
+    }
+
+    // ===== Pre-unlock broadcasts (mesh-wide time sync) =====
+    let pdu = 0x0001;
+    const broadcastTx = async (dst_ep: number, apdu: Buffer) => {
+      const id = pdu++;
+      try {
+        await t.send((fid) => buildDsapDataTx(fid, {
+          pduId: id, sourceEndpoint: SRC_EP, destAddress: BROADCAST,
+          destEndpoint: dst_ep, qos: 1, requestTxIndication: false, apdu,
+        }), TX_TIMEOUT_MS);
+      } catch { /* proceed even if confirm times out */ }
+      await new Promise(r => setTimeout(r, 100));
+    };
+    await broadcastTx(9,  HELLO_APDU);
+    await broadcastTx(13, HELLO_APDU);
+    await broadcastTx(9,  TIMEZONE_APDU);
+    await broadcastTx(13, buildTimeApdu());
+    await new Promise(r => setTimeout(r, 1500)); // settle so locks update their clock
+
+    // ===== Fire unlock =====
+    unlockSentAt = Date.now();
+    const pduId = pdu++;
+    await t.send((fid) => buildDsapDataTx(fid, {
+      pduId, sourceEndpoint: SRC_EP, destAddress: address, destEndpoint: DST_EP,
+      qos: 1, requestTxIndication: false, apdu: UNLOCK_APDU,
+    }), TX_TIMEOUT_MS).catch(() => { /* confirm may not arrive — proceed */ });
+
+    const start = Date.now();
+    const r = (): DataRxIndication | null => response;
+    while (!r() && Date.now() - start < RX_WAIT_MS) {
+      try { await t.pollIndications(); } catch { /* ignore */ }
+      await new Promise(rr => setTimeout(rr, POLL_PERIOD_MS));
+    }
+
+    const got = r();
+    if (!got) {
+      return { success: false, message: `no response from lock ${shortMac} within ${RX_WAIT_MS}ms` };
+    }
+    const first = got.apdu[0];
+    const hex = '0x' + first.toString(16).padStart(2, '0');
+    const ok = first === 0x50 || first === 0x75;
+    return ok
+      ? { success: true,  message: `lock ${shortMac} unlocked (resp ${hex})`, responseByte: hex }
+      : { success: false, message: `lock ${shortMac} responded but did not confirm open (resp ${hex})`, responseByte: hex };
+  } finally {
+    try { await t.close(); } catch { /* ignore */ }
+  }
+}
+
 async function main(): Promise<number> {
   const arg = process.argv[2];
   if (!arg) {
@@ -256,4 +373,8 @@ async function main(): Promise<number> {
   return 1;
 }
 
-main().then(code => process.exit(code), e => { console.error('[unlock] fatal:', e); process.exit(2); });
+// Only run the CLI when invoked directly, not when imported (the pi-bridge
+// WebSocket handler imports meshUnlock from this module).
+if (require.main === module) {
+  main().then(code => process.exit(code), e => { console.error('[unlock] fatal:', e); process.exit(2); });
+}

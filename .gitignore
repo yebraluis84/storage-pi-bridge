@@ -3,3 +3,11 @@ dist/
 .env
 *.log
 decoded-startup-v2.txt
+
+# Reverse-engineering capture artifacts — local-only, never committed.
+# keys-*.json in particular can hold captured lock key material.
+keys-*.json
+*.strace
+*.strace.gz
+*.decoded.txt
+sniff-*.gz

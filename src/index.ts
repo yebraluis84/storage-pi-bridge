@@ -21,6 +21,7 @@ import * as http from 'http';
 import { unlockLock } from './ble';
 import { startLockStatePoller } from './lockStates';
 import { captureGatewaygoUart } from './sniffMesh';
+import { meshUnlock } from './wirepas/wirepasUnlock';
 
 dotenv.config();
 
@@ -42,7 +43,7 @@ process.on('uncaughtException', (err) => {
 });
 
 interface IncomingMessage {
-  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay' | 'sniff_mesh';
+  type:                'unlock' | 'wirepas_unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay' | 'sniff_mesh';
   requestId?:          string;
   mac?:                string;
   offlineKey?:         string;
@@ -58,7 +59,7 @@ interface IncomingMessage {
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states' | 'sniff_mesh_result';
+  type:        'hello' | 'unlock_result' | 'wirepas_unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states' | 'sniff_mesh_result';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
@@ -161,6 +162,42 @@ function connect(): void {
           duration:  result.duration,
           battery:   result.battery,
         } satisfies OutgoingMessage));
+        break;
+      }
+
+      case 'wirepas_unlock': {
+        // Mesh-layer unlock: authenticates via the network cipher key on the
+        // Wirepas chip, so it works even when a lock's per-lock BLE offlineKey
+        // has been rotated (e.g. after a Noke service visit). Independent of
+        // the stale offlineKey/offlineUnlockCmd the phone BLE path uses.
+        if (!msg.mac) {
+          ws.send(JSON.stringify({
+            type:      'wirepas_unlock_result',
+            requestId: msg.requestId,
+            success:   false,
+            message:   'Missing mac in wirepas_unlock request',
+          } satisfies OutgoingMessage));
+          return;
+        }
+        console.log(`[ws] wirepas_unlock requested for ${msg.mac}`);
+        try {
+          const result = await meshUnlock(msg.mac);
+          ws.send(JSON.stringify({
+            type:      'wirepas_unlock_result',
+            requestId: msg.requestId,
+            success:   result.success,
+            message:   result.message,
+          } satisfies OutgoingMessage));
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(`[ws] wirepas_unlock failed: ${message}`);
+          ws.send(JSON.stringify({
+            type:      'wirepas_unlock_result',
+            requestId: msg.requestId,
+            success:   false,
+            message,
+          } satisfies OutgoingMessage));
+        }
         break;
       }
 
