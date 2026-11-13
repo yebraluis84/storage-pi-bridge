@@ -21,6 +21,7 @@ import * as http from 'http';
 import { unlockLock } from './ble';
 import { startLockStatePoller } from './lockStates';
 import { captureGatewaygoUart } from './sniffMesh';
+import { LoraGateway, LatchStatus } from './lora/loraGateway';
 
 dotenv.config();
 
@@ -42,11 +43,16 @@ process.on('uncaughtException', (err) => {
 });
 
 interface IncomingMessage {
-  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay' | 'sniff_mesh';
+  type:                'unlock' | 'ping' | 'restart_gatewaygo' | 'probe_gatewaygo' | 'pulse_relay' | 'sniff_mesh' | 'latch_ping';
   requestId?:          string;
+  // unlock — Noke/BLE path
   mac?:                string;
   offlineKey?:         string;
   offlineUnlockCmd?:   string;
+  // unlock / latch_ping — Synch LoRa latch path. Either latchId (bridge signs
+  // with its own key) or rawPacket (56 hex chars already signed by the backend).
+  latchId?:            number;
+  rawPacket?:          string;
   // pulse_relay
   host?:               string;
   channel?:            number;
@@ -58,7 +64,8 @@ interface IncomingMessage {
 }
 
 interface OutgoingMessage {
-  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states' | 'sniff_mesh_result';
+  type:        'hello' | 'unlock_result' | 'pong' | 'restart_gatewaygo_result' | 'probe_gatewaygo_result' | 'pulse_relay_result' | 'lock_states' | 'sniff_mesh_result'
+             | 'latch_ping_result' | 'latch_status';
   requestId?:  string;
   success?:    boolean;
   message?:    string;
@@ -69,6 +76,73 @@ interface OutgoingMessage {
   dataBase64?: string;
   rawBytes?:   number;
   pid?:        number;
+  // latch_status / latch_ping_result / unlock_result (LoRa path)
+  latch?:      LatchStatus;
+  // hello
+  lora?:       { connected: boolean; ready: boolean; port: string | null; firmware: string | null };
+}
+
+// ─── Synch LoRa gateway (XIAO + SX1262 on USB) ──────────────────────
+// Started once per process, independent of the WebSocket lifecycle: the
+// radio keeps hearing latch heartbeats while we are reconnecting to Railway.
+// Set LORA_ENABLED=0 on gateways that have no radio plugged in.
+
+const lora: LoraGateway | null = process.env.LORA_ENABLED === '0'
+  ? null
+  : new LoraGateway({
+      path:  process.env.LORA_SERIAL_PATH || undefined,
+      debug: process.env.LORA_DEBUG === '1',
+    });
+
+let activeWs: WebSocket | null = null;
+
+if (lora) {
+  lora.on('open',   (p: string)  => console.log(`[lora] port open ${p}`));
+  lora.on('ready',  (fw: string) => console.log(`[lora] gateway firmware: ${fw}`));
+  lora.on('close',  (r: string)  => console.warn(`[lora] ${r}`));
+  lora.on('error',  (e: Error)   => console.warn(`[lora] error: ${e.message}`));
+  lora.on('status', (s: LatchStatus) => {
+    console.log(`[lora] latch ${s.latchId} ${s.type} bolt=${s.bolt}${s.fired ? ' fired' : ''}${s.mismatch ? ' MISMATCH' : ''} rssi=${s.rssi} snr=${s.snr}`);
+    if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+      activeWs.send(JSON.stringify({
+        type:     'latch_status',
+        bridgeId: process.env.BRIDGE_ID ?? 'pi-1',
+        latch:    s,
+      } satisfies OutgoingMessage));
+    }
+  });
+  lora.start();
+} else {
+  console.log('[lora] disabled (LORA_ENABLED=0)');
+}
+
+function loraState(): OutgoingMessage['lora'] {
+  return {
+    connected: lora?.connected ?? false,
+    ready:     lora?.ready ?? false,
+    port:      lora?.path ?? null,
+    firmware:  lora?.firmware ?? null,
+  };
+}
+
+/** Unlock a Synch latch over LoRa. Mirrors unlockLock()'s result shape so the
+ *  backend's unlock_result handling is identical for both lock families. */
+async function unlockLatch(msg: IncomingMessage): Promise<{ success: boolean; message: string; duration: number; latch?: LatchStatus }> {
+  const t0 = Date.now();
+  if (!lora)        return { success: false, message: 'LoRa gateway disabled on this bridge', duration: 0 };
+  if (!lora.ready)  return { success: false, message: `LoRa radio not ready (${lora.connected ? 'no HELLO from firmware' : 'serial port not open'})`, duration: 0 };
+  try {
+    const st = msg.rawPacket
+      ? await lora.raw(msg.rawPacket)
+      : await lora.unlock(msg.latchId as number);
+    const duration = Date.now() - t0;
+    if (st.bolt !== 'open') {
+      return { success: false, message: `latch ${st.latchId} fired but sensor still reads locked`, duration, latch: st };
+    }
+    return { success: true, message: `latch ${st.latchId} open (rssi ${st.rssi} dBm, snr ${st.snr} dB)`, duration, latch: st };
+  } catch (err) {
+    return { success: false, message: (err as Error).message, duration: Date.now() - t0 };
+  }
 }
 
 const RECONNECT_DELAY_MS    = 5_000;
@@ -113,8 +187,10 @@ function connect(): void {
     const hello: OutgoingMessage = {
       type:     'hello',
       bridgeId,
+      lora:     loraState(),
     };
     ws.send(JSON.stringify(hello));
+    activeWs = ws;
     stopLockStatePoller = startLockStatePoller({ ws, bridgeId });
   });
 
@@ -137,6 +213,21 @@ function connect(): void {
         break;
 
       case 'unlock': {
+        // Synch LoRa latch: the backend names the latch (or hands us a
+        // pre-signed packet) instead of a Noke MAC + key.
+        if (typeof msg.latchId === 'number' || msg.rawPacket) {
+          const result = await unlockLatch(msg);
+          ws.send(JSON.stringify({
+            type:      'unlock_result',
+            requestId: msg.requestId,
+            success:   result.success,
+            message:   result.message,
+            duration:  result.duration,
+            latch:     result.latch,
+          } satisfies OutgoingMessage));
+          return;
+        }
+
         if (!msg.mac || !msg.offlineKey || !msg.offlineUnlockCmd) {
           ws.send(JSON.stringify({
             type:      'unlock_result',
@@ -161,6 +252,30 @@ function connect(): void {
           duration:  result.duration,
           battery:   result.battery,
         } satisfies OutgoingMessage));
+        break;
+      }
+
+      case 'latch_ping': {
+        if (typeof msg.latchId !== 'number') {
+          ws.send(JSON.stringify({ type: 'latch_ping_result', requestId: msg.requestId, success: false, message: 'Missing latchId' } satisfies OutgoingMessage));
+          return;
+        }
+        if (!lora || !lora.ready) {
+          ws.send(JSON.stringify({ type: 'latch_ping_result', requestId: msg.requestId, success: false, message: 'LoRa radio not ready' } satisfies OutgoingMessage));
+          return;
+        }
+        try {
+          const st = await lora.ping(msg.latchId);
+          ws.send(JSON.stringify({
+            type:      'latch_ping_result',
+            requestId: msg.requestId,
+            success:   true,
+            message:   `latch ${st.latchId} ${st.bolt} (rssi ${st.rssi} dBm)`,
+            latch:     st,
+          } satisfies OutgoingMessage));
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'latch_ping_result', requestId: msg.requestId, success: false, message: (err as Error).message } satisfies OutgoingMessage));
+        }
         break;
       }
 
@@ -249,6 +364,7 @@ function connect(): void {
 
   ws.on('close', (code, reason) => {
     stopHeartbeat();
+    if (activeWs === ws) activeWs = null;
     if (stopLockStatePoller) { stopLockStatePoller(); stopLockStatePoller = null; }
     console.warn(`[ws] disconnected (${code} ${reason}). Reconnecting in ${RECONNECT_DELAY_MS}ms...`);
     setTimeout(connect, RECONNECT_DELAY_MS);

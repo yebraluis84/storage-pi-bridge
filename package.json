@@ -12,7 +12,9 @@
     "wirepas:decode": "tsx src/wirepas/decodeCapture.ts",
     "wirepas:probe": "tsx src/wirepas/probe.ts",
     "wirepas:parse-strace": "tsx src/wirepas/parseStrace.ts",
-    "wirepas:unlock": "tsx src/wirepas/wirepasUnlock.ts"
+    "wirepas:unlock": "tsx src/wirepas/wirepasUnlock.ts",
+    "test": "tsx --test src/lora/parse.test.ts src/lora/loraGateway.test.ts",
+    "lora:selftest": "tsx src/lora/selftest.ts"
   },
   "dependencies": {
     "better-sqlite3": "^8.7.0",
