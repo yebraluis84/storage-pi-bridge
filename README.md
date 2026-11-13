@@ -101,6 +101,45 @@ end-to-end without the cloud:
 npm run test:unlock -- F3:25:19:08:73:38 6b481fdfcd6c7c215fa8a54f439f63a7 0001e4008a6cc77f1c4544236fd9a69ec2e18503
 ```
 
+### Synch LoRa latches (XIAO gateway on USB)
+
+Besides Noke locks over BLE/mesh, the bridge drives Synch's own latches over
+LoRa. A XIAO nRF52840 + Wio-SX1262 running
+[synch-latch-firmware](../synch-latch-firmware) in `ROLE_GATEWAY` plugs into
+the Pi's USB port and shows up as `/dev/ttyACM0`. The bridge opens it at boot,
+re-opens it if unplugged, and keeps it independent of the Railway WebSocket.
+
+```
+[backend] --ws--> [pi-bridge] --USB serial--> [XIAO gateway] --LoRa 915 MHz--> [latch]
+```
+
+Bench check without the cloud (gateway XIAO plugged in, latch id 1 powered):
+
+```bash
+npm run lora:selftest                   # auto-detect port, latch 1
+npm run lora:selftest -- /dev/ttyACM0 2 # explicit port, latch 2
+```
+
+Expected: `firmware: SYNCH-GW 0.1`, `ping ok: bolt=locked`, `unlock OK in ~1500 ms`,
+then heartbeats every 60 s.
+
+Backend contract (same WebSocket, same `unlock_result` shape as Noke):
+
+| Backend sends | Bridge replies | Notes |
+|---|---|---|
+| `{type:'unlock', requestId, latchId: 12}` | `unlock_result` + `latch` status | bridge signs with its key |
+| `{type:'unlock', requestId, rawPacket:'<56 hex>'}` | `unlock_result` + `latch` | backend-signed packet, passed through |
+| `{type:'latch_ping', requestId, latchId}` | `latch_ping_result` + `latch` | bolt state + RSSI without firing |
+| — | `latch_status` (unsolicited) | every heartbeat / pong / post-fire report |
+| — | `hello.lora` | `{connected, ready, port, firmware}` on connect |
+
+`latch` is `{latchId, type, bolt:'open'|'locked', mismatch, fired, uptimeMin, rssi, snr, counter, at}`.
+An unlock counts as success only when the latch's own sensor reports the bolt open.
+
+Env: `LORA_SERIAL_PATH` (optional, auto-detected), `LORA_ENABLED=0` to turn the
+driver off on gateways without a radio, `LORA_DEBUG=1` to log every serial line.
+Unit tests against a fake serial port: `npm test`.
+
 ### Run as a systemd service (production)
 
 Once you've confirmed it works manually, set it up to auto-start on boot:
