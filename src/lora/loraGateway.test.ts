@@ -52,7 +52,7 @@ function firmwareLike(): FakePort {
     return [`TX unlock id=${id} ctr=${ctr}`,
             // a heartbeat from another latch sneaks in first
             `RX type=status id=99 bolt=locked mismatch=0 fired=0 uptime=1m rssi=-80 snr=2.0 ctr=1`,
-            `RX type=status id=${id} bolt=open mismatch=0 fired=1 uptime=3m rssi=-56 snr=7.5 ctr=10`];
+            `RX type=status id=${id} bolt=open mismatch=0 fired=1 state=unlocking bar=in pin=up timeout=0 uptime=3m rssi=-56 snr=7.5 ctr=10`];
   }});
   return p;
 }
@@ -96,6 +96,9 @@ test('unlock waits for fired=1 from the right latch and forwards every status', 
   assert.equal(st.latchId, 3);
   assert.equal(st.fired, true);
   assert.equal(st.bolt, 'open');
+  assert.equal(st.state, 'unlocking');   // first report = pin up, before the bar moves
+  assert.equal(st.pin, 'up');
+  assert.equal(st.bar, 'in');
   assert.deepEqual(seen, [99, 3]);   // heartbeat from latch 99 was emitted, not swallowed
   gw.stop();
 });

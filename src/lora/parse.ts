@@ -6,7 +6,7 @@
  *
  *   OK SYNCH-GW 0.1 ready
  *   TX unlock id=1 ctr=1794511220
- *   RX type=status id=1 bolt=open mismatch=0 fired=1 uptime=12m rssi=-71 snr=9.5 ctr=42
+ *   RX type=status id=1 bolt=open mismatch=0 fired=1 state=open bar=out pin=up timeout=0 uptime=12m rssi=-71 snr=9.5 ctr=42
  *   HEX 5301...
  *   ERR usage: UNLOCK <id 1-65535> <counter>
  *   [radio] up                      (free-form log lines from the firmware)
@@ -14,18 +14,26 @@
  * Pure functions only, so this file is unit-testable without hardware.
  */
 
+export type LatchCycleState = 'locked' | 'unlocking' | 'open' | 'relocking' | 'fault' | 'unknown';
+
 export interface LatchStatus {
   latchId:   number;
   type:      'status' | 'pong';
-  bolt:      'open' | 'locked';
-  mismatch:  boolean;   // fired but the sensor still says locked
-  fired:     boolean;   // this report follows a bolt pulse
+  bolt:      'open' | 'locked';   // 'open' = pin up or bar out (anything but fully locked)
+  mismatch:  boolean;   // FAULT: pin did not lift / did not drop when it should have
+  fired:     boolean;   // this report follows an unlock command
+  state:     LatchCycleState;     // where the latch is in its cycle ('unknown' on old firmware)
+  bar:       'in' | 'out' | 'unknown';   // latch bar in its locked position, or slid out
+  pin:       'up' | 'down' | 'unknown';  // blocking pin retracted (up) or dropped (down)
+  timedOut:  boolean;   // unlock window passed with nobody sliding the bar
   uptimeMin: number;
   rssi:      number;    // dBm as heard by the gateway
   snr:       number;    // dB
   counter:   number;    // latch's own tx counter
   at:        string;    // ISO timestamp, when the bridge parsed it
 }
+
+const CYCLE_STATES: LatchCycleState[] = ['locked', 'unlocking', 'open', 'relocking', 'fault'];
 
 export type GatewayLine =
   | { kind: 'ok';   text: string }
@@ -73,6 +81,10 @@ export function parseGatewayLine(raw: string, now: Date = new Date()): GatewayLi
         bolt:      f.bolt === 'open' ? 'open' : 'locked',
         mismatch:  f.mismatch === '1',
         fired:     f.fired === '1',
+        state:     CYCLE_STATES.includes(f.state as LatchCycleState) ? (f.state as LatchCycleState) : 'unknown',
+        bar:       f.bar === 'in' ? 'in' : f.bar === 'out' ? 'out' : 'unknown',
+        pin:       f.pin === 'up' ? 'up' : f.pin === 'down' ? 'down' : 'unknown',
+        timedOut:  f.timeout === '1',
         uptimeMin: Number((f.uptime ?? '0').replace(/m$/, '')),
         rssi:      Number(f.rssi ?? 0),
         snr:       Number(f.snr ?? 0),

@@ -4,14 +4,37 @@ import { parseGatewayLine, splitLines } from './parse';
 
 const NOW = new Date('2026-11-13T00:00:00Z');
 
-test('parses a status line', () => {
+test('parses a status line from old firmware (no cycle fields)', () => {
   const r = parseGatewayLine('RX type=status id=1 bolt=open mismatch=0 fired=1 uptime=12m rssi=-71 snr=9.5 ctr=42', NOW);
   assert.equal(r.kind, 'rx');
   if (r.kind !== 'rx') return;
   assert.deepEqual(r.status, {
     latchId: 1, type: 'status', bolt: 'open', mismatch: false, fired: true,
+    state: 'unknown', bar: 'unknown', pin: 'unknown', timedOut: false,
     uptimeMin: 12, rssi: -71, snr: 9.5, counter: 42, at: NOW.toISOString(),
   });
+});
+
+test('parses the latch cycle fields', () => {
+  const r = parseGatewayLine('RX type=status id=3 bolt=open mismatch=0 fired=1 state=unlocking bar=in pin=up timeout=0 uptime=1m rssi=-60 snr=8.0 ctr=5', NOW);
+  assert.equal(r.kind, 'rx');
+  if (r.kind !== 'rx') return;
+  assert.equal(r.status.state, 'unlocking');
+  assert.equal(r.status.bar, 'in');
+  assert.equal(r.status.pin, 'up');
+  assert.equal(r.status.timedOut, false);
+
+  const t = parseGatewayLine('RX type=status id=3 bolt=locked mismatch=0 fired=1 state=locked bar=in pin=down timeout=1 uptime=1m rssi=-60 snr=8.0 ctr=6', NOW);
+  if (t.kind !== 'rx') return assert.fail('expected rx');
+  assert.equal(t.status.timedOut, true);
+  assert.equal(t.status.state, 'locked');
+
+  const u = parseGatewayLine('RX type=status id=3 bolt=open mismatch=1 fired=1 state=bogus bar=sideways pin=? timeout=0 uptime=1m rssi=-60 snr=8.0 ctr=7', NOW);
+  if (u.kind !== 'rx') return assert.fail('expected rx');
+  assert.equal(u.status.state, 'unknown');
+  assert.equal(u.status.bar, 'unknown');
+  assert.equal(u.status.pin, 'unknown');
+  assert.equal(u.status.mismatch, true);
 });
 
 test('parses a pong with mismatch', () => {
