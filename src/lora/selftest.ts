@@ -17,7 +17,7 @@ const latchId = Number(process.argv[3] || 1);
 const gw = new LoraGateway({ path, debug: process.env.LORA_DEBUG === '1' });
 gw.on('open',   (p)  => console.log(`[selftest] port open ${p}`));
 gw.on('close',  (r)  => console.log(`[selftest] closed: ${r}`));
-gw.on('status', (s)  => console.log(`[selftest] status id=${s.latchId} ${s.type} bolt=${s.bolt} fired=${s.fired} mismatch=${s.mismatch} rssi=${s.rssi} snr=${s.snr}`));
+gw.on('status', (s)  => console.log(`[selftest] status id=${s.latchId} ${s.type} state=${s.state} bar=${s.bar} pin=${s.pin} fired=${s.fired} timedOut=${s.timedOut} fault=${s.mismatch} rssi=${s.rssi} snr=${s.snr}`));
 gw.on('error',  (e)  => console.log(`[selftest] error: ${e.message}`));
 
 gw.once('ready', async (fw) => {
@@ -27,7 +27,8 @@ gw.once('ready', async (fw) => {
     console.log(`[selftest] ping ok: bolt=${pong.bolt} rssi=${pong.rssi}`);
     const t0 = Date.now();
     const st = await gw.unlock(latchId);
-    console.log(`[selftest] unlock ${st.bolt === 'open' ? 'OK' : 'FAILED (sensor says locked)'} in ${Date.now() - t0} ms`);
+    const ok = st.pin === 'up' || st.bar === 'out' || (st.state === 'unknown' && st.bolt === 'open');
+    console.log(`[selftest] unlock ${ok ? 'OK, pin up — slide the bar now' : `FAILED (state=${st.state} bar=${st.bar} pin=${st.pin})`} in ${Date.now() - t0} ms`);
   } catch (e) {
     console.log(`[selftest] FAILED: ${(e as Error).message}`);
   }

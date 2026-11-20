@@ -133,8 +133,9 @@ Backend contract (same WebSocket, same `unlock_result` shape as Noke):
 | — | `latch_status` (unsolicited) | every heartbeat / pong / post-fire report |
 | — | `hello.lora` | `{connected, ready, port, firmware}` on connect |
 
-`latch` is `{latchId, type, bolt:'open'|'locked', mismatch, fired, uptimeMin, rssi, snr, counter, at}`.
-An unlock counts as success only when the latch's own sensor reports the bolt open.
+`latch` is `{latchId, type, bolt:'open'|'locked', state, bar, pin, timedOut, mismatch, fired, uptimeMin, rssi, snr, counter, at}` where `state` is the latch cycle (`locked | unlocking | open | relocking | fault`, `unknown` on old firmware), `bar` is the latch bar (`in | out`), `pin` is the blocking pin (`up | down`), `timedOut` means the unlock window passed with nobody sliding the bar, and `mismatch` is the fault flag.
+
+An unlock resolves on the latch's first report after the command: success when the pin is confirmed up (`pin=up`, message "ready to slide") or the bar is already out; failure on fault or timeout. The rest of the cycle (bar out → relocked, or timed out) arrives as `latch_status` messages a few seconds later.
 
 Env: `LORA_SERIAL_PATH` (optional, auto-detected), `LORA_ENABLED=0` to turn the
 driver off on gateways without a radio, `LORA_DEBUG=1` to log every serial line.

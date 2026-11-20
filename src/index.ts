@@ -102,7 +102,7 @@ if (lora) {
   lora.on('close',  (r: string)  => console.warn(`[lora] ${r}`));
   lora.on('error',  (e: Error)   => console.warn(`[lora] error: ${e.message}`));
   lora.on('status', (s: LatchStatus) => {
-    console.log(`[lora] latch ${s.latchId} ${s.type} bolt=${s.bolt}${s.fired ? ' fired' : ''}${s.mismatch ? ' MISMATCH' : ''} rssi=${s.rssi} snr=${s.snr}`);
+    console.log(`[lora] latch ${s.latchId} ${s.type} state=${s.state} bar=${s.bar} pin=${s.pin}${s.fired ? ' after-unlock' : ''}${s.timedOut ? ' TIMED-OUT' : ''}${s.mismatch ? ' FAULT' : ''} rssi=${s.rssi} snr=${s.snr}`);
     if (activeWs && activeWs.readyState === WebSocket.OPEN) {
       activeWs.send(JSON.stringify({
         type:     'latch_status',
@@ -136,10 +136,22 @@ async function unlockLatch(msg: IncomingMessage): Promise<{ success: boolean; me
       ? await lora.raw(msg.rawPacket)
       : await lora.unlock(msg.latchId as number);
     const duration = Date.now() - t0;
-    if (st.bolt !== 'open') {
-      return { success: false, message: `latch ${st.latchId} fired but sensor still reads locked`, duration, latch: st };
+    // The latch answers an unlock as soon as its pin is confirmed up ("go ahead,
+    // slide the bar"). Later reports — bar out, relocked, timed out — arrive as
+    // latch_status messages. Old firmware (no state field) only reports after
+    // its fixed pulse, so fall back to the bolt flag there.
+    if (st.mismatch || st.state === 'fault') {
+      return { success: false, message: `latch ${st.latchId} FAULT: pin did not move (bar=${st.bar} pin=${st.pin})`, duration, latch: st };
     }
-    return { success: true, message: `latch ${st.latchId} open (rssi ${st.rssi} dBm, snr ${st.snr} dB)`, duration, latch: st };
+    if (st.timedOut) {
+      return { success: false, message: `latch ${st.latchId} unlock window expired, nobody opened`, duration, latch: st };
+    }
+    const unlocked = st.pin === 'up' || st.bar === 'out' || (st.state === 'unknown' && st.bolt === 'open');
+    if (!unlocked) {
+      return { success: false, message: `latch ${st.latchId} answered but is still locked (state=${st.state})`, duration, latch: st };
+    }
+    const what = st.bar === 'out' ? 'open' : 'pin up, ready to slide';
+    return { success: true, message: `latch ${st.latchId} ${what} (rssi ${st.rssi} dBm, snr ${st.snr} dB)`, duration, latch: st };
   } catch (err) {
     return { success: false, message: (err as Error).message, duration: Date.now() - t0 };
   }
